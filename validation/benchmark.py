@@ -38,6 +38,8 @@ N_ITERATIONS = 5
 FEATURE_SIZES = [1_000, 5_000, 10_000, 25_000]
 FEATURE_M = 100
 TOPK_K = 3
+SNIPPETS_K = 3
+SNIPPETS_SIZES = [1_000, 5_000, 10_000, 25_000]
 
 
 def generate_signal(n: int, seed: int = 42) -> np.ndarray:
@@ -169,6 +171,57 @@ def bench_rust_topk(ts: np.ndarray, m: int, k: int) -> float:
         raise RuntimeError(f"validation_runner failed: {result.stderr}")
     out = json.loads(result.stdout)
     return out["compute_s"]
+
+
+def bench_stumpy_snippets(ts: np.ndarray, m: int, k: int) -> float:
+    """Benchmark stumpy.snippets, return elapsed seconds."""
+    start = time.perf_counter()
+    stumpy.snippets(ts, m, k)
+    return time.perf_counter() - start
+
+
+def bench_rust_snippets(ts: np.ndarray, m: int, k: int) -> float:
+    """Benchmark motif-rs snippets, return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench", "ts": ts.tolist(), "m": m, "k": k,
+        "signal_type": "snippets",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def run_snippets_benchmarks() -> list[dict]:
+    """Run snippets benchmarks at multiple sizes."""
+    results = []
+    for n in SNIPPETS_SIZES:
+        ts = generate_signal(n)
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_snippets(ts, FEATURE_M, SNIPPETS_K))
+            rust_times.append(bench_rust_snippets(ts, FEATURE_M, SNIPPETS_K))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "snippets", "n": n, "m": FEATURE_M, "k": SNIPPETS_K,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  Snippets n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
 
 
 def run_aamp_benchmarks() -> list[dict]:
@@ -339,6 +392,7 @@ def generate_report(
     aamp_results: list[dict] | None = None,
     ab_join_results: list[dict] | None = None,
     topk_results: list[dict] | None = None,
+    snippets_results: list[dict] | None = None,
 ):
     """Generate markdown benchmark report."""
     report = []
@@ -401,6 +455,17 @@ def generate_report(
                 f"| **{r['speedup']:.1f}x** |"
             )
 
+    # Snippets
+    if snippets_results:
+        report.append(f"\n## Snippets (m={FEATURE_M}, k={SNIPPETS_K})\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in snippets_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
     # Notes
     report.append("\n## Notes\n")
     report.append(
@@ -439,6 +504,8 @@ def generate_report(
         raw_data["ab_join"] = ab_join_results
     if topk_results:
         raw_data["topk"] = topk_results
+    if snippets_results:
+        raw_data["snippets"] = snippets_results
 
     raw_path = os.path.join(RESULTS_DIR, "benchmark_raw.json")
     with open(raw_path, "w") as f:
@@ -497,9 +564,13 @@ def main():
     print(f"\nTop-{TOPK_K} benchmarks (m={FEATURE_M}, {N_ITERATIONS} iterations):\n")
     topk_results = run_topk_benchmarks()
 
+    # Snippets benchmarks
+    print(f"\nSnippets benchmarks (m={FEATURE_M}, k={SNIPPETS_K}, {N_ITERATIONS} iterations):\n")
+    snippets_results = run_snippets_benchmarks()
+
     # Generate report
     print()
-    generate_report(batch_results, streaming_results, aamp_results, ab_join_results, topk_results)
+    generate_report(batch_results, streaming_results, aamp_results, ab_join_results, topk_results, snippets_results)
 
 
 if __name__ == "__main__":

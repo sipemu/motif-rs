@@ -284,6 +284,55 @@ def generate_fluss():
     })
 
 
+def generate_snippets():
+    """Snippets: representative subsequence extraction."""
+    print("Generating snippets_multi_regime.json...")
+    n = 1000
+    m = 50
+    k = 3
+    np.random.seed(42)
+
+    # Multi-regime signal: sine, sawtooth, noise
+    ts = np.zeros(n)
+    for i in range(333):
+        ts[i] = np.sin(i * 2 * np.pi / 50) + 0.05 * np.random.randn()
+    for i in range(333, 666):
+        phase = (i - 333) % 30
+        ts[i] = (phase / 30.0) * 2 - 1 + 0.05 * np.random.randn()
+    for i in range(666, 1000):
+        ts[i] = 0.5 * np.random.randn()
+
+    result = stumpy.snippets(ts, m, k)
+    # Returns 6-tuple:
+    #   0: snippets (k, m)       — actual subsequence data
+    #   1: indices (k,)          — starting indices
+    #   2: profiles (k, n_subs)  — distance profiles
+    #   3: fractions (k,)
+    #   4: areas (k,)
+    #   5: regimes (n_regimes, 3) — [snippet_idx, start, end] run-length encoded
+
+    snippets_indices = result[1]
+    snippets_profiles = result[2]
+    snippets_fractions = result[3]
+    snippets_areas = result[4]
+
+    # Compute per-position regimes from profiles (argmin across snippets)
+    regimes = np.argmin(snippets_profiles, axis=0).astype(int)
+
+    save_golden("snippets_multi_regime.json", {
+        "description": f"Snippets on multi-regime signal, n={n}, m={m}, k={k}",
+        "ts": ts,
+        "m": m,
+        "n": n,
+        "k": k,
+        "indices": snippets_indices,
+        "profiles": snippets_profiles,
+        "fractions": snippets_fractions,
+        "areas": snippets_areas,
+        "regimes": regimes,
+    })
+
+
 if __name__ == "__main__":
     print("Generating golden reference data for new features using stumpy...\n")
     generate_aamp()
@@ -292,4 +341,5 @@ if __name__ == "__main__":
     generate_motifs()
     generate_discords()
     generate_fluss()
+    generate_snippets()
     print("\nDone! Run 'cargo test' to validate against these references.")

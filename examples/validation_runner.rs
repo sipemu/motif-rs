@@ -11,7 +11,9 @@
 //! ```
 
 use motif_rs::algorithms::stampi::Stampi;
-use motif_rs::{AampEngine, EuclideanEngine, MatrixProfileConfig, ZNormalizedEuclidean};
+use motif_rs::{
+    find_snippets, AampEngine, EuclideanEngine, MatrixProfileConfig, ZNormalizedEuclidean,
+};
 use std::io::{self, Read};
 use std::time::Instant;
 
@@ -28,6 +30,7 @@ fn main() {
         "aamp" => run_aamp(&data, m),
         "ab_join" => run_ab_join(&data, m),
         "topk" => run_topk(&data, m),
+        "snippets" => run_snippets(&data, m),
         _ => run_batch(&data, m),
     };
 
@@ -130,6 +133,29 @@ fn run_topk(data: &serde_json::Value, m: usize) -> serde_json::Value {
         "k": k,
         "n": ts.len(),
         "compute_s": compute_s,
+    })
+}
+
+fn run_snippets(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts = parse_ts(data, "ts");
+    let k = data["k"].as_u64().unwrap() as usize;
+
+    let start = Instant::now();
+    let result = find_snippets(&ts, m, k);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::snippets",
+        "m": m,
+        "k": k,
+        "n": ts.len(),
+        "compute_s": compute_s,
+        "indices": result.indices,
+        "profiles": result.profiles.iter().map(|p| sanitize_profile(p)).collect::<Vec<_>>(),
+        "fractions": result.fractions,
+        "areas": result.areas,
+        "regimes": result.regimes,
     })
 }
 

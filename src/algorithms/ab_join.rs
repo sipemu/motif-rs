@@ -73,7 +73,436 @@ pub fn ab_join<M: DistanceMetric>(
     (jp_a, jp_b)
 }
 
+// ---------------------------------------------------------------------------
+// Correlation-domain AB-join inner loop helpers
+//
+// Mirrors the self-join STOMP optimizations from stomp.rs:
+// - f64::mul_add() for FMA fusion on QT recurrence and neg_r
+// - Hoisted p=0 (no branch in inner loop)
+// - Unsafe get_unchecked for bounds-check elimination
+// - 4-wide diagonal grouping for SIMD opportunities
+// - Pre-computed m_mean_a/b for FMA-friendly neg_r computation
+// - Branchless/branching dispatch based on has_constant
+// ---------------------------------------------------------------------------
+
+/// Read-only context shared by all AB-join correlation-domain inner loop helpers.
+struct CorrCtxAB<'a> {
+    ts_a: &'a [f64],
+    ts_b: &'a [f64],
+    m: usize,
+    n_a: usize,
+    n_b: usize,
+    qt_first_pos: &'a [f64],
+    qt_first_neg: &'a [f64],
+    mean_a: &'a [f64],
+    mean_b: &'a [f64],
+    m_sigma_inv_a: &'a [f64],
+    m_sigma_inv_b: &'a [f64],
+    m_mean_a: &'a [f64],
+    m_mean_b: &'a [f64],
+}
+
+// --- Positive diagonal helpers (k = 0..n_b, step p: i=p, j=p+k) ---
+
+/// Process a single positive diagonal (branchless, no constant-subsequence checks).
+#[inline(always)]
+fn ab_diag_pos_single_branchless(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let diag_len = cx.n_a.min(cx.n_b - k);
+    // SAFETY: All indices are in bounds:
+    // - qt_first_pos[k]: k < n_b = qt_first_pos.len()
+    // - mean_a/msi_a/m_mean_a[p]: p < diag_len <= n_a
+    // - mean_b/msi_b[j]: j = p+k < n_a+n_b <= ts_b.len(), actually j < n_b
+    // - ts_a[p-1..p+m-1]: p >= 1, p+m-1 < n_a+m-1 = ts_a.len()
+    // - ts_b[j-1..j+m-1]: j >= 1, j+m-1 < n_b+m-1 = ts_b.len()
+    unsafe {
+        let qt_init = *cx.qt_first_pos.get_unchecked(k);
+        let neg_r = (*cx.m_mean_a.get_unchecked(0)).mul_add(*cx.mean_b.get_unchecked(k), -qt_init)
+            * *cx.m_sigma_inv_a.get_unchecked(0)
+            * *cx.m_sigma_inv_b.get_unchecked(k);
+        acc_a.update(0, neg_r, k);
+        acc_b.update(k, neg_r, 0);
+
+        let mut qt = qt_init;
+        for p in 1..diag_len {
+            let j = p + k;
+            qt = (-*cx.ts_a.get_unchecked(p - 1)).mul_add(*cx.ts_b.get_unchecked(j - 1), qt);
+            qt = (*cx.ts_a.get_unchecked(p + cx.m - 1))
+                .mul_add(*cx.ts_b.get_unchecked(j + cx.m - 1), qt);
+            let neg_r = (*cx.m_mean_a.get_unchecked(p)).mul_add(*cx.mean_b.get_unchecked(j), -qt)
+                * *cx.m_sigma_inv_a.get_unchecked(p)
+                * *cx.m_sigma_inv_b.get_unchecked(j);
+            acc_a.update(p, neg_r, j);
+            acc_b.update(j, neg_r, p);
+        }
+    }
+}
+
+/// Process a single positive diagonal with constant-subsequence handling.
+#[inline(always)]
+fn ab_diag_pos_single_branching(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let diag_len = cx.n_a.min(cx.n_b - k);
+    unsafe {
+        let qt_init = *cx.qt_first_pos.get_unchecked(k);
+        let si = *cx.m_sigma_inv_a.get_unchecked(0);
+        let sj = *cx.m_sigma_inv_b.get_unchecked(k);
+        let neg_r = if si == 0.0 && sj == 0.0 {
+            -1.0
+        } else if si == 0.0 || sj == 0.0 {
+            0.0
+        } else {
+            (*cx.m_mean_a.get_unchecked(0)).mul_add(*cx.mean_b.get_unchecked(k), -qt_init) * si * sj
+        };
+        acc_a.update(0, neg_r, k);
+        acc_b.update(k, neg_r, 0);
+
+        let mut qt = qt_init;
+        for p in 1..diag_len {
+            let j = p + k;
+            qt = (-*cx.ts_a.get_unchecked(p - 1)).mul_add(*cx.ts_b.get_unchecked(j - 1), qt);
+            qt = (*cx.ts_a.get_unchecked(p + cx.m - 1))
+                .mul_add(*cx.ts_b.get_unchecked(j + cx.m - 1), qt);
+            let si = *cx.m_sigma_inv_a.get_unchecked(p);
+            let sj = *cx.m_sigma_inv_b.get_unchecked(j);
+            let neg_r = if si == 0.0 && sj == 0.0 {
+                -1.0
+            } else if si == 0.0 || sj == 0.0 {
+                0.0
+            } else {
+                (*cx.m_mean_a.get_unchecked(p)).mul_add(*cx.mean_b.get_unchecked(j), -qt) * si * sj
+            };
+            acc_a.update(p, neg_r, j);
+            acc_b.update(j, neg_r, p);
+        }
+    }
+}
+
+/// Process 4 adjacent positive diagonals simultaneously (branchless).
+///
+/// Diagonals k, k+1, k+2, k+3 share `ts_a[p-1]` and `ts_a[p+m-1]`, while
+/// `ts_b[j-1..j+2]` and `ts_b[j+m-1..j+m+2]` are consecutive loads —
+/// enabling the compiler to use packed AVX2 operations.
+#[inline(always)]
+#[allow(clippy::needless_range_loop)]
+fn ab_diag_pos_group4_branchless(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let min_diag_len = cx.n_a.min(cx.n_b - k - 3);
+    unsafe {
+        let mut qt = [
+            *cx.qt_first_pos.get_unchecked(k),
+            *cx.qt_first_pos.get_unchecked(k + 1),
+            *cx.qt_first_pos.get_unchecked(k + 2),
+            *cx.qt_first_pos.get_unchecked(k + 3),
+        ];
+
+        // p = 0: shared A-side values
+        let mm0 = *cx.m_mean_a.get_unchecked(0);
+        let si0 = *cx.m_sigma_inv_a.get_unchecked(0);
+        for d in 0..4usize {
+            let j = k + d;
+            let neg_r = mm0.mul_add(*cx.mean_b.get_unchecked(j), -qt[d])
+                * si0
+                * *cx.m_sigma_inv_b.get_unchecked(j);
+            acc_a.update(0, neg_r, j);
+            acc_b.update(j, neg_r, 0);
+        }
+
+        // p = 1..min_diag_len: 4-wide recurrence + neg_r
+        for p in 1..min_diag_len {
+            let j_base = p + k;
+            let neg_a = -*cx.ts_a.get_unchecked(p - 1);
+            let c = *cx.ts_a.get_unchecked(p + cx.m - 1);
+            let mm = *cx.m_mean_a.get_unchecked(p);
+            let si = *cx.m_sigma_inv_a.get_unchecked(p);
+
+            for d in 0..4usize {
+                let j = j_base + d;
+                qt[d] = neg_a.mul_add(*cx.ts_b.get_unchecked(j - 1), qt[d]);
+                qt[d] = c.mul_add(*cx.ts_b.get_unchecked(j + cx.m - 1), qt[d]);
+                let neg_r = mm.mul_add(*cx.mean_b.get_unchecked(j), -qt[d])
+                    * si
+                    * *cx.m_sigma_inv_b.get_unchecked(j);
+                acc_a.update(p, neg_r, j);
+                acc_b.update(j, neg_r, p);
+            }
+        }
+
+        // Tail: each diagonal may extend 0-3 elements beyond min_diag_len
+        for d in 0..4usize {
+            let kd = k + d;
+            let diag_len = cx.n_a.min(cx.n_b - kd);
+            let mut qt_d = qt[d];
+            for p in min_diag_len..diag_len {
+                let j = p + kd;
+                qt_d =
+                    (-*cx.ts_a.get_unchecked(p - 1)).mul_add(*cx.ts_b.get_unchecked(j - 1), qt_d);
+                qt_d = (*cx.ts_a.get_unchecked(p + cx.m - 1))
+                    .mul_add(*cx.ts_b.get_unchecked(j + cx.m - 1), qt_d);
+                let neg_r = (*cx.m_mean_a.get_unchecked(p))
+                    .mul_add(*cx.mean_b.get_unchecked(j), -qt_d)
+                    * *cx.m_sigma_inv_a.get_unchecked(p)
+                    * *cx.m_sigma_inv_b.get_unchecked(j);
+                acc_a.update(p, neg_r, j);
+                acc_b.update(j, neg_r, p);
+            }
+        }
+    }
+}
+
+// --- Negative diagonal helpers (k = 1..n_a, step p: i=p+k, j=p) ---
+// Shared (4-wide): ts_b[p-1], ts_b[p+m-1], m_mean_b[p], msi_b[p]
+// Varying: ts_a[i-1], ts_a[i+m-1], mean_a[i], msi_a[i]
+
+/// Process a single negative diagonal (branchless).
+#[inline(always)]
+fn ab_diag_neg_single_branchless(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let diag_len = cx.n_b.min(cx.n_a - k);
+    unsafe {
+        let qt_init = *cx.qt_first_neg.get_unchecked(k);
+        // p=0: i=k, j=0. Use m_mean_b[0] * mean_a[k] form (equivalent, enables shared hoisting).
+        let neg_r = (*cx.m_mean_b.get_unchecked(0)).mul_add(*cx.mean_a.get_unchecked(k), -qt_init)
+            * *cx.m_sigma_inv_a.get_unchecked(k)
+            * *cx.m_sigma_inv_b.get_unchecked(0);
+        acc_a.update(k, neg_r, 0);
+        acc_b.update(0, neg_r, k);
+
+        let mut qt = qt_init;
+        for p in 1..diag_len {
+            let i = p + k;
+            qt = (-*cx.ts_a.get_unchecked(i - 1)).mul_add(*cx.ts_b.get_unchecked(p - 1), qt);
+            qt = (*cx.ts_a.get_unchecked(i + cx.m - 1))
+                .mul_add(*cx.ts_b.get_unchecked(p + cx.m - 1), qt);
+            let neg_r = (*cx.m_mean_b.get_unchecked(p)).mul_add(*cx.mean_a.get_unchecked(i), -qt)
+                * *cx.m_sigma_inv_a.get_unchecked(i)
+                * *cx.m_sigma_inv_b.get_unchecked(p);
+            acc_a.update(i, neg_r, p);
+            acc_b.update(p, neg_r, i);
+        }
+    }
+}
+
+/// Process a single negative diagonal with constant-subsequence handling.
+#[inline(always)]
+fn ab_diag_neg_single_branching(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let diag_len = cx.n_b.min(cx.n_a - k);
+    unsafe {
+        let qt_init = *cx.qt_first_neg.get_unchecked(k);
+        let si = *cx.m_sigma_inv_a.get_unchecked(k);
+        let sj = *cx.m_sigma_inv_b.get_unchecked(0);
+        let neg_r = if si == 0.0 && sj == 0.0 {
+            -1.0
+        } else if si == 0.0 || sj == 0.0 {
+            0.0
+        } else {
+            (*cx.m_mean_b.get_unchecked(0)).mul_add(*cx.mean_a.get_unchecked(k), -qt_init) * si * sj
+        };
+        acc_a.update(k, neg_r, 0);
+        acc_b.update(0, neg_r, k);
+
+        let mut qt = qt_init;
+        for p in 1..diag_len {
+            let i = p + k;
+            qt = (-*cx.ts_a.get_unchecked(i - 1)).mul_add(*cx.ts_b.get_unchecked(p - 1), qt);
+            qt = (*cx.ts_a.get_unchecked(i + cx.m - 1))
+                .mul_add(*cx.ts_b.get_unchecked(p + cx.m - 1), qt);
+            let si = *cx.m_sigma_inv_a.get_unchecked(i);
+            let sj = *cx.m_sigma_inv_b.get_unchecked(p);
+            let neg_r = if si == 0.0 && sj == 0.0 {
+                -1.0
+            } else if si == 0.0 || sj == 0.0 {
+                0.0
+            } else {
+                (*cx.m_mean_b.get_unchecked(p)).mul_add(*cx.mean_a.get_unchecked(i), -qt) * si * sj
+            };
+            acc_a.update(i, neg_r, p);
+            acc_b.update(p, neg_r, i);
+        }
+    }
+}
+
+/// Process 4 adjacent negative diagonals simultaneously (branchless).
+///
+/// Diagonals k, k+1, k+2, k+3: j=p is shared across all lanes.
+/// Shared: `ts_b[p-1]`, `ts_b[p+m-1]`, `m_mean_b[p]`, `msi_b[p]`.
+/// Varying: `ts_a[i-1]`, `ts_a[i+m-1]`, `mean_a[i]`, `msi_a[i]` — consecutive loads.
+#[inline(always)]
+#[allow(clippy::needless_range_loop)]
+fn ab_diag_neg_group4_branchless(
+    cx: &CorrCtxAB<'_>,
+    k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let min_diag_len = cx.n_b.min(cx.n_a - k - 3);
+    unsafe {
+        let mut qt = [
+            *cx.qt_first_neg.get_unchecked(k),
+            *cx.qt_first_neg.get_unchecked(k + 1),
+            *cx.qt_first_neg.get_unchecked(k + 2),
+            *cx.qt_first_neg.get_unchecked(k + 3),
+        ];
+
+        // p = 0: i = k+d, j = 0. Shared B-side: m_mean_b[0], msi_b[0].
+        let mm0 = *cx.m_mean_b.get_unchecked(0);
+        let si0 = *cx.m_sigma_inv_b.get_unchecked(0);
+        for d in 0..4usize {
+            let i = k + d;
+            let neg_r = mm0.mul_add(*cx.mean_a.get_unchecked(i), -qt[d])
+                * *cx.m_sigma_inv_a.get_unchecked(i)
+                * si0;
+            acc_a.update(i, neg_r, 0);
+            acc_b.update(0, neg_r, i);
+        }
+
+        // p = 1..min_diag_len: 4-wide recurrence
+        for p in 1..min_diag_len {
+            let i_base = p + k;
+            let neg_b = -*cx.ts_b.get_unchecked(p - 1);
+            let c_b = *cx.ts_b.get_unchecked(p + cx.m - 1);
+            let mm = *cx.m_mean_b.get_unchecked(p);
+            let si_b = *cx.m_sigma_inv_b.get_unchecked(p);
+
+            for d in 0..4usize {
+                let i = i_base + d;
+                qt[d] = neg_b.mul_add(*cx.ts_a.get_unchecked(i - 1), qt[d]);
+                qt[d] = c_b.mul_add(*cx.ts_a.get_unchecked(i + cx.m - 1), qt[d]);
+                let neg_r = mm.mul_add(*cx.mean_a.get_unchecked(i), -qt[d])
+                    * *cx.m_sigma_inv_a.get_unchecked(i)
+                    * si_b;
+                acc_a.update(i, neg_r, p);
+                acc_b.update(p, neg_r, i);
+            }
+        }
+
+        // Tail: each diagonal may extend 0-3 elements beyond min_diag_len
+        for d in 0..4usize {
+            let kd = k + d;
+            let diag_len = cx.n_b.min(cx.n_a - kd);
+            let mut qt_d = qt[d];
+            for p in min_diag_len..diag_len {
+                let i = p + kd;
+                qt_d =
+                    (-*cx.ts_a.get_unchecked(i - 1)).mul_add(*cx.ts_b.get_unchecked(p - 1), qt_d);
+                qt_d = (*cx.ts_a.get_unchecked(i + cx.m - 1))
+                    .mul_add(*cx.ts_b.get_unchecked(p + cx.m - 1), qt_d);
+                let neg_r = (*cx.m_mean_b.get_unchecked(p))
+                    .mul_add(*cx.mean_a.get_unchecked(i), -qt_d)
+                    * *cx.m_sigma_inv_a.get_unchecked(i)
+                    * *cx.m_sigma_inv_b.get_unchecked(p);
+                acc_a.update(i, neg_r, p);
+                acc_b.update(p, neg_r, i);
+            }
+        }
+    }
+}
+
+// --- Range processing with 4-wide grouping ---
+
+/// Process a range of positive diagonals using the branchless path with 4-wide grouping.
+#[inline(always)]
+fn process_ab_pos_branchless(
+    cx: &CorrCtxAB<'_>,
+    start_k: usize,
+    end_k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let mut k = start_k;
+    while k + 4 <= end_k {
+        ab_diag_pos_group4_branchless(cx, k, acc_a, acc_b);
+        k += 4;
+    }
+    while k < end_k {
+        ab_diag_pos_single_branchless(cx, k, acc_a, acc_b);
+        k += 1;
+    }
+}
+
+/// Process a range of positive diagonals using the branching path (handles constants).
+#[inline(always)]
+fn process_ab_pos_branching(
+    cx: &CorrCtxAB<'_>,
+    start_k: usize,
+    end_k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    for k in start_k..end_k {
+        ab_diag_pos_single_branching(cx, k, acc_a, acc_b);
+    }
+}
+
+/// Process a range of negative diagonals using the branchless path with 4-wide grouping.
+#[inline(always)]
+fn process_ab_neg_branchless(
+    cx: &CorrCtxAB<'_>,
+    start_k: usize,
+    end_k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    let mut k = start_k;
+    while k + 4 <= end_k {
+        ab_diag_neg_group4_branchless(cx, k, acc_a, acc_b);
+        k += 4;
+    }
+    while k < end_k {
+        ab_diag_neg_single_branchless(cx, k, acc_a, acc_b);
+        k += 1;
+    }
+}
+
+/// Process a range of negative diagonals using the branching path (handles constants).
+#[inline(always)]
+fn process_ab_neg_branching(
+    cx: &CorrCtxAB<'_>,
+    start_k: usize,
+    end_k: usize,
+    acc_a: &mut JoinAccumulator,
+    acc_b: &mut JoinAccumulator,
+) {
+    for k in start_k..end_k {
+        ab_diag_neg_single_branching(cx, k, acc_a, acc_b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Correlation-domain AB-join entry points
+// ---------------------------------------------------------------------------
+
 /// Correlation-domain AB-join (serial).
+///
+/// Inner loop optimizations (mirroring self-join STOMP):
+/// - Negated Pearson correlations (defers sqrt to O(n) final pass)
+/// - `f64::mul_add()` for FMA fusion on QT recurrence and neg_r
+/// - Hoisted p=0 (no branch in inner loop)
+/// - Unchecked indexing (bounds verified by invariants)
+/// - 4-wide diagonal grouping (consecutive loads enable AVX2 auto-vectorization)
+/// - Pre-computed `m_mean` arrays for FMA-friendly neg_r
+/// - Branchless/branching dispatch based on `has_constant`
 #[allow(clippy::too_many_arguments)]
 fn ab_join_corr<M: DistanceMetric>(
     ts_a: &[f64],
@@ -86,53 +515,39 @@ fn ab_join_corr<M: DistanceMetric>(
     jp_a: &mut JoinProfile,
     jp_b: &mut JoinProfile,
 ) {
-    let (mean_a, msi_a, mean_b, msi_b, _has_constant) = M::correlation_data_ab(ctx_a, ctx_b);
+    let (mean_a, msi_a, mean_b, msi_b, has_constant) = M::correlation_data_ab(ctx_a, ctx_b);
     let m_f = m as f64;
 
-    // Positive diagonals: qt_first_pos[j] = dot(T_A[0..m], T_B[j..j+m])
     let qt_first_pos = sliding_dot_product(&ts_a[0..m], ts_b);
-    // Negative diagonals: qt_first_neg[i] = dot(T_B[0..m], T_A[i..i+m])
     let qt_first_neg = sliding_dot_product(&ts_b[0..m], ts_a);
 
+    let m_mean_a: Vec<f64> = mean_a.iter().map(|&mu| m_f * mu).collect();
+    let m_mean_b: Vec<f64> = mean_b.iter().map(|&mu| m_f * mu).collect();
+
+    let cx = CorrCtxAB {
+        ts_a,
+        ts_b,
+        m,
+        n_a,
+        n_b,
+        qt_first_pos: &qt_first_pos,
+        qt_first_neg: &qt_first_neg,
+        mean_a,
+        mean_b,
+        m_sigma_inv_a: msi_a,
+        m_sigma_inv_b: msi_b,
+        m_mean_a: &m_mean_a,
+        m_mean_b: &m_mean_b,
+    };
     let mut acc_a = JoinAccumulator::new(n_a);
     let mut acc_b = JoinAccumulator::new(n_b);
 
-    // Positive diagonals: k = 0..n_b-1, start at (i=0, j=k)
-    for k in 0..n_b {
-        let diag_len = n_a.min(n_b - k);
-        let mut qt = qt_first_pos[k];
-
-        let neg_r = corr_neg_r(qt, m_f, mean_a[0], mean_b[k], msi_a[0], msi_b[k]);
-        acc_a.update(0, neg_r, k);
-        acc_b.update(k, neg_r, 0);
-
-        for p in 1..diag_len {
-            let i = p;
-            let j = p + k;
-            qt = qt - ts_a[i - 1] * ts_b[j - 1] + ts_a[i + m - 1] * ts_b[j + m - 1];
-            let neg_r = corr_neg_r(qt, m_f, mean_a[i], mean_b[j], msi_a[i], msi_b[j]);
-            acc_a.update(i, neg_r, j);
-            acc_b.update(j, neg_r, i);
-        }
-    }
-
-    // Negative diagonals: k = 1..n_a-1, start at (i=k, j=0)
-    for k in 1..n_a {
-        let diag_len = n_b.min(n_a - k);
-        let mut qt = qt_first_neg[k];
-
-        let neg_r = corr_neg_r(qt, m_f, mean_a[k], mean_b[0], msi_a[k], msi_b[0]);
-        acc_a.update(k, neg_r, 0);
-        acc_b.update(0, neg_r, k);
-
-        for p in 1..diag_len {
-            let i = p + k;
-            let j = p;
-            qt = qt - ts_a[i - 1] * ts_b[j - 1] + ts_a[i + m - 1] * ts_b[j + m - 1];
-            let neg_r = corr_neg_r(qt, m_f, mean_a[i], mean_b[j], msi_a[i], msi_b[j]);
-            acc_a.update(i, neg_r, j);
-            acc_b.update(j, neg_r, i);
-        }
+    if !has_constant {
+        process_ab_pos_branchless(&cx, 0, n_b, &mut acc_a, &mut acc_b);
+        process_ab_neg_branchless(&cx, 1, n_a, &mut acc_a, &mut acc_b);
+    } else {
+        process_ab_pos_branching(&cx, 0, n_b, &mut acc_a, &mut acc_b);
+        process_ab_neg_branching(&cx, 1, n_a, &mut acc_a, &mut acc_b);
     }
 
     let two_m = 2.0 * m_f;
@@ -140,19 +555,66 @@ fn ab_join_corr<M: DistanceMetric>(
     acc_b.write_to_join_profile(jp_b, |nc| (two_m * (1.0 + nc)).max(0.0).sqrt());
 }
 
-/// Compute negated Pearson correlation for AB-join.
-#[inline(always)]
-fn corr_neg_r(qt: f64, m_f: f64, mean_i: f64, mean_j: f64, msi_i: f64, msi_j: f64) -> f64 {
-    if msi_i == 0.0 && msi_j == 0.0 {
-        -1.0 // both constant → perfect match
-    } else if msi_i == 0.0 || msi_j == 0.0 {
-        0.0 // one constant → max distance
-    } else {
-        (m_f * mean_i).mul_add(mean_j, -qt) * msi_i * msi_j
+/// Partition AB-join diagonals into load-balanced chunks.
+///
+/// Uses a unified numbering: d = 0..n_b are positive diagonals, d = n_b..(n_b+n_a-1)
+/// are negative diagonals. Returns ranges in this unified space.
+#[cfg(feature = "parallel")]
+fn compute_ab_diagonal_ranges(n_a: usize, n_b: usize, n_chunks: usize) -> Vec<(usize, usize)> {
+    let total_diags = n_b + n_a.saturating_sub(1);
+    if total_diags == 0 || n_chunks == 0 {
+        return vec![];
     }
+    let n_chunks = n_chunks.min(total_diags);
+
+    // Cumulative work via prefix sums (O(n_a + n_b) allocation, negligible vs O(n^2) loop)
+    let mut cum_work = Vec::with_capacity(total_diags + 1);
+    cum_work.push(0usize);
+    for d in 0..total_diags {
+        let w = if d < n_b {
+            n_a.min(n_b - d)
+        } else {
+            let k = d - n_b + 1;
+            n_b.min(n_a - k)
+        };
+        cum_work.push(cum_work[d] + w);
+    }
+    let total_work = cum_work[total_diags];
+
+    let mut ranges = Vec::with_capacity(n_chunks);
+    let mut prev = 0;
+
+    for c in 1..=n_chunks {
+        let target = if c == n_chunks {
+            total_diags
+        } else {
+            let threshold = (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
+            let mut lo = prev;
+            let mut hi = total_diags;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if cum_work[mid] >= threshold {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            lo
+        };
+
+        if target > prev {
+            ranges.push((prev, target));
+        }
+        prev = target;
+    }
+
+    ranges
 }
 
-/// Parallel correlation-domain AB-join.
+/// Parallel correlation-domain AB-join with load-balanced chunking.
+///
+/// Single parallel pass over all diagonals (positive + negative combined),
+/// using work-balanced partitioning to equalize load across threads.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 fn ab_join_corr_parallel<M: DistanceMetric>(
@@ -168,39 +630,58 @@ fn ab_join_corr_parallel<M: DistanceMetric>(
 ) {
     use rayon::prelude::*;
 
-    let (mean_a, msi_a, mean_b, msi_b, _has_constant) = M::correlation_data_ab(ctx_a, ctx_b);
+    let (mean_a, msi_a, mean_b, msi_b, has_constant) = M::correlation_data_ab(ctx_a, ctx_b);
     let m_f = m as f64;
 
     let qt_first_pos = sliding_dot_product(&ts_a[0..m], ts_b);
     let qt_first_neg = sliding_dot_product(&ts_b[0..m], ts_a);
 
+    let m_mean_a: Vec<f64> = mean_a.iter().map(|&mu| m_f * mu).collect();
+    let m_mean_b: Vec<f64> = mean_b.iter().map(|&mu| m_f * mu).collect();
+
+    let cx = CorrCtxAB {
+        ts_a,
+        ts_b,
+        m,
+        n_a,
+        n_b,
+        qt_first_pos: &qt_first_pos,
+        qt_first_neg: &qt_first_neg,
+        mean_a,
+        mean_b,
+        m_sigma_inv_a: msi_a,
+        m_sigma_inv_b: msi_b,
+        m_mean_a: &m_mean_a,
+        m_mean_b: &m_mean_b,
+    };
+
     let n_threads = rayon::current_num_threads();
+    let ranges = compute_ab_diagonal_ranges(n_a, n_b, n_threads);
 
-    // Process positive diagonals in parallel
-    let chunk_size_pos = n_b.div_ceil(n_threads);
-    let pos_results: Vec<(JoinAccumulator, JoinAccumulator)> = (0..n_threads)
+    let results: Vec<(JoinAccumulator, JoinAccumulator)> = ranges
         .into_par_iter()
-        .map(|t| {
-            let start_k = t * chunk_size_pos;
-            let end_k = (start_k + chunk_size_pos).min(n_b);
+        .map(|(start_d, end_d)| {
             let mut acc_a = JoinAccumulator::new(n_a);
             let mut acc_b = JoinAccumulator::new(n_b);
 
-            for k in start_k..end_k {
-                let diag_len = n_a.min(n_b - k);
-                let mut qt = qt_first_pos[k];
+            // Positive diagonals in [start_d, min(end_d, n_b))
+            let pos_end = end_d.min(n_b);
+            if start_d < pos_end {
+                if !has_constant {
+                    process_ab_pos_branchless(&cx, start_d, pos_end, &mut acc_a, &mut acc_b);
+                } else {
+                    process_ab_pos_branching(&cx, start_d, pos_end, &mut acc_a, &mut acc_b);
+                }
+            }
 
-                let neg_r = corr_neg_r(qt, m_f, mean_a[0], mean_b[k], msi_a[0], msi_b[k]);
-                acc_a.update(0, neg_r, k);
-                acc_b.update(k, neg_r, 0);
-
-                for p in 1..diag_len {
-                    let i = p;
-                    let j = p + k;
-                    qt = qt - ts_a[i - 1] * ts_b[j - 1] + ts_a[i + m - 1] * ts_b[j + m - 1];
-                    let neg_r = corr_neg_r(qt, m_f, mean_a[i], mean_b[j], msi_a[i], msi_b[j]);
-                    acc_a.update(i, neg_r, j);
-                    acc_b.update(j, neg_r, i);
+            // Negative diagonals: unified d >= n_b maps to neg diagonal k = d - n_b + 1
+            if end_d > n_b {
+                let neg_start_k = if start_d >= n_b { start_d - n_b + 1 } else { 1 };
+                let neg_end_k = end_d - n_b + 1;
+                if !has_constant {
+                    process_ab_neg_branchless(&cx, neg_start_k, neg_end_k, &mut acc_a, &mut acc_b);
+                } else {
+                    process_ab_neg_branching(&cx, neg_start_k, neg_end_k, &mut acc_a, &mut acc_b);
                 }
             }
 
@@ -208,44 +689,11 @@ fn ab_join_corr_parallel<M: DistanceMetric>(
         })
         .collect();
 
-    // Process negative diagonals in parallel
-    let n_neg = n_a.saturating_sub(1);
-    let chunk_size_neg = n_neg.div_ceil(n_threads);
-    let neg_results: Vec<(JoinAccumulator, JoinAccumulator)> = (0..n_threads)
-        .into_par_iter()
-        .map(|t| {
-            let start_k = t * chunk_size_neg + 1;
-            let end_k = (start_k + chunk_size_neg).min(n_a);
-            let mut acc_a = JoinAccumulator::new(n_a);
-            let mut acc_b = JoinAccumulator::new(n_b);
-
-            for k in start_k..end_k {
-                let diag_len = n_b.min(n_a - k);
-                let mut qt = qt_first_neg[k];
-
-                let neg_r = corr_neg_r(qt, m_f, mean_a[k], mean_b[0], msi_a[k], msi_b[0]);
-                acc_a.update(k, neg_r, 0);
-                acc_b.update(0, neg_r, k);
-
-                for p in 1..diag_len {
-                    let i = p + k;
-                    let j = p;
-                    qt = qt - ts_a[i - 1] * ts_b[j - 1] + ts_a[i + m - 1] * ts_b[j + m - 1];
-                    let neg_r = corr_neg_r(qt, m_f, mean_a[i], mean_b[j], msi_a[i], msi_b[j]);
-                    acc_a.update(i, neg_r, j);
-                    acc_b.update(j, neg_r, i);
-                }
-            }
-
-            (acc_a, acc_b)
-        })
-        .collect();
-
-    // Merge all results
+    // Merge all thread-local results
     let mut combined_a = JoinAccumulator::new(n_a);
     let mut combined_b = JoinAccumulator::new(n_b);
 
-    for (acc_a, acc_b) in pos_results.iter().chain(neg_results.iter()) {
+    for (acc_a, acc_b) in &results {
         combined_a.merge(acc_a);
         combined_b.merge(acc_b);
     }

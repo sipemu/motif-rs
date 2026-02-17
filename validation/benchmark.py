@@ -200,7 +200,7 @@ MPDIST_M = 100
 STIMP_SIZES = [1_000, 5_000, 10_000]
 STIMP_MIN_M = 10
 STIMP_MAX_M = 100
-STIMP_STEP = 5
+STIMP_STEP = 1
 
 
 def bench_stumpy_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
@@ -226,9 +226,18 @@ def bench_rust_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
 
 
 def bench_stumpy_stimp(ts: np.ndarray, min_m: int, max_m: int) -> float:
-    """Benchmark stumpy.stimp, return elapsed seconds."""
+    """Benchmark stumpy.stimp, return elapsed seconds.
+
+    stumpy.stimp is lazy — the constructor returns immediately and profiles are
+    computed on-demand. We must call update() for all window sizes and access
+    PAN_ to force full computation.
+    """
+    n_windows = max_m - min_m + 1
     start = time.perf_counter()
-    stumpy.stimp(ts, min_m=min_m, max_m=max_m)
+    pan = stumpy.stimp(ts, min_m=min_m, max_m=max_m)
+    for _ in range(n_windows):
+        pan.update()
+    _ = pan.PAN_
     return time.perf_counter() - start
 
 

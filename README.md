@@ -5,27 +5,71 @@
 
 A high-performance matrix profile library for time series analysis, validated against [stumpy](https://github.com/TDAmeritrade/stumpy).
 
-The [matrix profile](https://www.cs.ucr.edu/~eamonn/MatrixProfile.html) stores the z-normalized Euclidean distance between every subsequence of a time series and its nearest neighbor, enabling discovery of motifs (recurring patterns), discords (anomalies), shapelets, chains, and regime changes.
+The [matrix profile](https://www.cs.ucr.edu/~eamonn/MatrixProfile.html) stores the distance between every subsequence of a time series and its nearest neighbor, enabling discovery of motifs (recurring patterns), discords (anomalies), regime changes, and more.
 
 ## Features
 
 - **Batch STOMP** — diagonal traversal with O(1) QT recurrence updates per element
 - **Streaming STAMPI** — incremental matrix profile with grow and egress (sliding window) modes
+- **AB-Join** — cross-series comparison (find shared patterns between two time series)
+- **Top-k neighbors** — store the k nearest neighbors per subsequence, not just the best
+- **Motif discovery** — extract the top-k most repeated patterns
+- **Discord detection** — find the top-k most anomalous subsequences
+- **FLUSS segmentation** — detect regime changes via the Corrected Arc Curve
+- **AAMP** — non-normalized (absolute) Euclidean distance matrix profile
 - **Parallel computation** — load-balanced diagonal partitioning via [Rayon](https://github.com/rayon-rs/rayon)
-- **Left/right matrix profiles** — directional nearest-neighbor distances for time series segmentation
+- **Left/right matrix profiles** — directional nearest-neighbor distances
 - **Extensible metric trait** — `DistanceMetric` trait with static dispatch via monomorphization
 
 ## Performance
 
-Benchmarked against stumpy (Numba JIT, parallel) on random walk data, m=100, 5 iterations (median):
+Benchmarked against stumpy (Numba JIT, parallel) on sine + noise signals, 5 iterations (median). motif-rs is faster across every feature and scale:
+
+### Batch STOMP (z-normalized, m=100)
 
 | n | stumpy | motif-rs | Speedup |
 |--:|-------:|---------:|--------:|
-| 1,000 | 0.013s | 0.002s | **8.6x** |
-| 5,000 | 0.061s | 0.010s | **6.0x** |
-| 10,000 | 0.094s | 0.019s | **5.0x** |
-| 25,000 | 0.300s | 0.084s | **3.6x** |
-| 50,000 | 0.870s | 0.292s | **3.0x** |
+| 1,000 | 0.010s | 0.001s | **8.0x** |
+| 5,000 | 0.050s | 0.008s | **6.0x** |
+| 10,000 | 0.120s | 0.020s | **6.1x** |
+| 25,000 | 0.307s | 0.078s | **3.9x** |
+| 50,000 | 0.882s | 0.274s | **3.2x** |
+
+### AAMP (non-normalized Euclidean, m=100)
+
+| n | stumpy | motif-rs | Speedup |
+|--:|-------:|---------:|--------:|
+| 1,000 | 0.009s | 0.002s | **5.7x** |
+| 5,000 | 0.091s | 0.010s | **9.2x** |
+| 10,000 | 0.239s | 0.030s | **8.1x** |
+| 25,000 | 1.297s | 0.197s | **6.6x** |
+
+### AB-Join (m=100, n_a = n_b)
+
+| n | stumpy | motif-rs | Speedup |
+|--:|-------:|---------:|--------:|
+| 1,000 | 0.011s | 0.002s | **5.0x** |
+| 5,000 | 0.057s | 0.020s | **2.9x** |
+| 10,000 | 0.113s | 0.078s | **1.4x** |
+| 25,000 | 0.391s | 0.297s | **1.3x** |
+
+### Top-k Nearest Neighbors (m=100, k=3)
+
+| n | stumpy | motif-rs | Speedup |
+|--:|-------:|---------:|--------:|
+| 1,000 | 0.016s | 0.002s | **7.4x** |
+| 5,000 | 0.085s | 0.017s | **5.0x** |
+| 10,000 | 0.147s | 0.048s | **3.1x** |
+| 25,000 | 0.399s | 0.224s | **1.8x** |
+
+### Streaming STAMPI (m=50, +200 points)
+
+| n_initial | stumpy | motif-rs | Speedup |
+|----------:|-------:|---------:|--------:|
+| 500 | 0.047s | 0.004s | **12.4x** |
+| 1,000 | 0.055s | 0.007s | **8.3x** |
+| 2,000 | 0.068s | 0.012s | **5.4x** |
+| 5,000 | 0.102s | 0.029s | **3.5x** |
 
 Key optimizations: correlation-domain inner loop (deferred sqrt), precomputed inverse standard deviations, hardware FMA via `f64::mul_add`, AoS cache-line accumulator, 4-wide diagonal grouping, and unsafe bounds elision. Built with fat LTO, single codegen unit, and `target-cpu=native`.
 
@@ -53,6 +97,78 @@ println!("Distances: {:?}", mp.profile);
 println!("Indices:   {:?}", mp.profile_index);
 ```
 
+### Motif and Discord Discovery
+
+```rust
+use motif_rs::{EuclideanEngine, MatrixProfileConfig};
+
+let ts: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.1).sin()).collect();
+let engine = EuclideanEngine::new(MatrixProfileConfig::new(50));
+let mp = engine.compute(&ts);
+
+// Top-3 motifs (most repeated patterns)
+let motifs = motif_rs::find_motifs(&mp, 3);
+for m in &motifs {
+    println!("Motif: indices ({}, {}), distance {:.4}", m.idx_a, m.idx_b, m.distance);
+}
+
+// Top-3 discords (most anomalous subsequences)
+let discords = motif_rs::find_discords(&mp, 3);
+for d in &discords {
+    println!("Discord: index {}, distance {:.4}", d.idx, d.distance);
+}
+```
+
+### AB-Join (Cross-Series Comparison)
+
+```rust
+use motif_rs::{EuclideanEngine, MatrixProfileConfig};
+
+let ts_a: Vec<f64> = (0..500).map(|i| (i as f64 * 0.1).sin()).collect();
+let ts_b: Vec<f64> = (0..500).map(|i| (i as f64 * 0.13).cos()).collect();
+
+let engine = EuclideanEngine::new(MatrixProfileConfig::new(30));
+let (join_a, join_b) = engine.ab_join(&ts_a, &ts_b);
+// join_a: for each A subsequence, its nearest neighbor in B
+// join_b: for each B subsequence, its nearest neighbor in A
+```
+
+### Regime Change Detection (FLUSS)
+
+```rust
+use motif_rs::{EuclideanEngine, MatrixProfileConfig};
+
+let ts: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.1).sin()).collect();
+let engine = EuclideanEngine::new(MatrixProfileConfig::new(25));
+let mp = engine.compute(&ts);
+
+let seg = motif_rs::fluss(&mp, 2); // detect 2 regime boundaries
+println!("Boundaries: {:?}", seg.regime_boundaries);
+// seg.cac contains the Corrected Arc Curve (low values = boundaries)
+```
+
+### Top-k Nearest Neighbors
+
+```rust
+use motif_rs::{EuclideanEngine, MatrixProfileConfig};
+
+let ts: Vec<f64> = (0..500).map(|i| (i as f64 * 0.1).sin()).collect();
+let engine = EuclideanEngine::new(MatrixProfileConfig::new(30));
+let topk = engine.compute_topk(&ts, 3); // k=3 nearest neighbors
+// topk.distances[i] = [d1, d2, d3] sorted ascending for subsequence i
+```
+
+### AAMP (Non-normalized Distance)
+
+```rust
+use motif_rs::{AampEngine, MatrixProfileConfig};
+
+// AAMP uses raw Euclidean distance — amplitude and offset matter
+let ts: Vec<f64> = (0..500).map(|i| (i as f64 * 0.1).sin()).collect();
+let engine = AampEngine::new(MatrixProfileConfig::new(30));
+let mp = engine.compute(&ts);
+```
+
 ### Streaming (Grow Mode)
 
 ```rust
@@ -61,12 +177,10 @@ use motif_rs::{EuclideanEngine, MatrixProfileConfig};
 let initial_ts: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
 let engine = EuclideanEngine::new(MatrixProfileConfig::new(10));
 
-let mut stream = engine.streaming(&initial_ts, false);
+let mut stream = engine.streaming(&initial_ts, false); // grow mode
 stream.update(0.42);
 stream.update(0.87);
-
 let mp = stream.profile();
-println!("Profile length: {}", mp.profile.len());
 ```
 
 ### Streaming (Egress Mode)
@@ -80,16 +194,6 @@ let engine = EuclideanEngine::new(MatrixProfileConfig::new(10));
 // Fixed-size window: oldest points dropped as new ones arrive
 let mut stream = engine.streaming(&initial_ts, true);
 stream.update(0.42);
-```
-
-### Configuration
-
-```rust
-use motif_rs::MatrixProfileConfig;
-
-let mut config = MatrixProfileConfig::new(100); // subsequence length m=100
-config.ignore_trivial = true;      // apply exclusion zone (default: true)
-config.exclusion_zone_denom = 4;   // zone = ceil(m/4) (default: 4, matches stumpy)
 ```
 
 ## Output
@@ -133,14 +237,37 @@ For best performance, ensure `.cargo/config.toml` targets your CPU:
 rustflags = ["-C", "target-cpu=native"]
 ```
 
+## Examples
+
+Self-contained examples covering each feature (see `examples/`):
+
+```bash
+cargo run --release --example basic_matrix_profile
+cargo run --release --example motif_discovery
+cargo run --release --example anomaly_detection
+cargo run --release --example segmentation
+cargo run --release --example ab_join
+cargo run --release --example streaming
+cargo run --release --example aamp
+```
+
 ## Validation
 
-Results are validated against stumpy with MAD < 1e-10 across sine, square, mixed, and streaming signals:
+All features are validated against stumpy via golden integration tests. Each test loads reference data generated by stumpy and compares output at epsilon < 1e-6:
+
+```bash
+cargo test                           # run all tests (70 total)
+cargo test --test features_golden_test  # AAMP, AB-join, top-k, motifs, discords, FLUSS
+cargo test --test stomp_golden_test     # batch STOMP
+cargo test --test stampi_golden_test    # streaming STAMPI
+```
+
+To regenerate golden data or run the stumpy comparison benchmarks:
 
 ```bash
 pip install stumpy numpy
-python validation/run_all.py
-python validation/compare_results.py
+python scripts/generate_golden_features.py   # regenerate reference data
+python validation/benchmark.py               # run performance benchmarks
 ```
 
 ## Dependencies

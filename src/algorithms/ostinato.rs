@@ -12,6 +12,36 @@ pub struct ConsensusMotif {
     pub subsequence_index: usize,
 }
 
+/// Evaluate a single candidate series: compute the max NN distance across all
+/// other series for each subsequence, and return the best (minimum max-radius).
+fn evaluate_candidate<M: DistanceMetric>(
+    ts_list: &[&[f64]],
+    c: usize,
+    m: usize,
+) -> ConsensusMotif {
+    let n_c = ts_list[c].len() - m + 1;
+    let mut max_radius = vec![0.0_f64; n_c];
+
+    for (o, _) in ts_list.iter().enumerate().filter(|&(o, _)| o != c) {
+        let (jp_c, _) = ab_join::<M>(ts_list[c], ts_list[o], m);
+        for (mr, &d) in max_radius.iter_mut().zip(&jp_c.distances) {
+            *mr = mr.max(d);
+        }
+    }
+
+    let (subsequence_index, &radius) = max_radius
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap();
+
+    ConsensusMotif {
+        radius,
+        ts_index: c,
+        subsequence_index,
+    }
+}
+
 /// Find the consensus motif across multiple time series.
 ///
 /// The consensus motif is the subsequence (from any series) whose maximum
@@ -45,47 +75,16 @@ pub fn ostinato<M: DistanceMetric>(ts_list: &[&[f64]], m: usize) -> ConsensusMot
         );
     }
 
-    let k = ts_list.len();
     let mut best = ConsensusMotif {
         radius: f64::INFINITY,
         ts_index: 0,
         subsequence_index: 0,
     };
 
-    // For each candidate "central" series
-    for c in 0..k {
-        let n_c = ts_list[c].len() - m + 1;
-
-        // max_radius[i] = max NN distance of subsequence i in series c across all other series
-        let mut max_radius = vec![0.0_f64; n_c];
-
-        for o in 0..k {
-            if o == c {
-                continue;
-            }
-
-            // AB-join: find NN of each subsequence in series c within series o
-            let (jp_c, _) = ab_join::<M>(ts_list[c], ts_list[o], m);
-
-            // Update max_radius element-wise
-            for (mr, &d) in max_radius.iter_mut().zip(&jp_c.distances) {
-                if d > *mr {
-                    *mr = d;
-                }
-            }
-
-            // Pruning: if the current best candidate in this series already
-            // exceeds the global best, we could prune early. But for correctness
-            // and simplicity, we check after all series.
-        }
-
-        // Find the subsequence with minimum max-radius in this candidate series
-        for (i, &r) in max_radius.iter().enumerate() {
-            if r < best.radius {
-                best.radius = r;
-                best.ts_index = c;
-                best.subsequence_index = i;
-            }
+    for c in 0..ts_list.len() {
+        let candidate = evaluate_candidate::<M>(ts_list, c, m);
+        if candidate.radius < best.radius {
+            best = candidate;
         }
     }
 

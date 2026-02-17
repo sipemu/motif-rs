@@ -3,6 +3,73 @@ use crate::algorithms::stomp::stomp;
 use crate::core::distance_metric::DistanceMetric;
 use crate::core::matrix_profile::{MatrixProfile, MatrixProfileConfig};
 
+/// Compute the MASS distance profile for a query subsequence at `query_idx`.
+fn mass_distance_profile<M: DistanceMetric>(
+    ts: &[f64],
+    query_idx: usize,
+    m: usize,
+    n_subs: usize,
+    ctx: &M::Context,
+) -> Vec<f64> {
+    if M::supports_qt_optimization() {
+        let query = &ts[query_idx..query_idx + m];
+        let qts = sliding_dot_product(query, ts);
+        (0..n_subs)
+            .map(|j| M::qt_to_distance(qts[j], query_idx, j, m, ctx))
+            .collect()
+    } else {
+        M::distance_profile(ts, query_idx, m, ctx)
+    }
+}
+
+/// Update the matrix profile symmetrically from a full distance profile,
+/// skipping pairs within the exclusion zone.
+fn update_from_distance_profile(
+    mp: &mut MatrixProfile,
+    dp: &[f64],
+    query_idx: usize,
+    exclusion_zone: usize,
+) {
+    for (j, &d) in dp.iter().enumerate() {
+        if j.abs_diff(query_idx) > exclusion_zone {
+            mp.update(query_idx, d, j);
+            mp.update(j, d, query_idx);
+        }
+    }
+}
+
+/// Walk a diagonal using QT recurrence to propagate distance updates.
+/// Starting from diagonal offset `k`, computes pairs (k+p, p) for p = 1..
+fn propagate_diagonal<M: DistanceMetric>(
+    ts: &[f64],
+    mp: &mut MatrixProfile,
+    k: usize,
+    m: usize,
+    n_subs: usize,
+    exclusion_zone: usize,
+    ctx: &M::Context,
+) {
+    if k >= n_subs {
+        return;
+    }
+
+    let mut qt: f64 = ts[k..k + m].iter().zip(&ts[0..m]).map(|(a, b)| a * b).sum();
+
+    for p in 1..(n_subs - k).min(n_subs) {
+        let i = p + k;
+        if i >= n_subs {
+            break;
+        }
+        let j = p;
+        qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
+        let d = M::qt_to_distance(qt, i, j, m, ctx);
+        if j.abs_diff(i) > exclusion_zone {
+            mp.update(i, d, j);
+            mp.update(j, d, i);
+        }
+    }
+}
+
 /// Compute an approximate matrix profile using the PreSCRIMP algorithm.
 ///
 /// Samples a fraction of diagonals to produce an approximate profile much faster
@@ -26,7 +93,6 @@ pub fn scrump<M: DistanceMetric>(
         "percentage must be > 0.0, got {percentage}"
     );
 
-    // At 100% or more, just use exact STOMP
     if percentage >= 1.0 {
         return stomp::<M>(ts, config);
     }
@@ -41,17 +107,13 @@ pub fn scrump<M: DistanceMetric>(
     let ctx = M::precompute(ts, m);
     let mut mp = MatrixProfile::new(n_subs, m, exclusion_zone);
 
-    // PreSCRIMP: sample random diagonal indices and compute MASS distance profiles
-    // for those query subsequences, then walk the diagonal to propagate matches.
-    //
-    // Number of diagonals to sample (excluding trivial match diagonals)
+    // Number of diagonals to sample (excluding trivial match zone)
     let n_diags = n_subs.saturating_sub(exclusion_zone + 1);
     let n_samples = ((percentage * n_diags as f64).ceil() as usize)
         .max(1)
         .min(n_diags);
 
-    // Deterministic sampling: evenly spaced diagonal indices
-    // This avoids requiring an RNG dependency and gives reproducible results.
+    // Deterministic evenly-spaced sampling (no RNG dependency)
     let step = if n_samples >= n_diags {
         1
     } else {
@@ -64,56 +126,11 @@ pub fn scrump<M: DistanceMetric>(
             break;
         }
 
-        // Compute the distance profile for the subsequence at diag_idx
-        let dp = if M::supports_qt_optimization() {
-            let query = &ts[diag_idx..diag_idx + m];
-            let qts = sliding_dot_product(query, ts);
-            (0..n_subs)
-                .map(|j| M::qt_to_distance(qts[j], diag_idx, j, m, &ctx))
-                .collect::<Vec<f64>>()
-        } else {
-            M::distance_profile(ts, diag_idx, m, &ctx)
-        };
+        let dp = mass_distance_profile::<M>(ts, diag_idx, m, n_subs, &ctx);
+        update_from_distance_profile(&mut mp, &dp, diag_idx, exclusion_zone);
 
-        // Apply exclusion zone around the query index and update the profile
-        for (j, &d) in dp.iter().enumerate() {
-            if j.abs_diff(diag_idx) <= exclusion_zone {
-                continue;
-            }
-            mp.update(diag_idx, d, j);
-            mp.update(j, d, diag_idx);
-        }
-
-        // Walk the diagonal: propagate along the diagonal using QT recurrence
-        // This is the PreSCRIMP optimization — each sampled diagonal gives O(n) updates
         if M::supports_qt_optimization() {
-            // Walk forward along the diagonal from (diag_idx, 0)
-            // Diagonal k = diag_idx: pairs (i, j) = (i, i - diag_idx) for i >= diag_idx
-            // But we use (i, j) where j = i + k or i = j + k depending on direction
-            // Here: query is at diag_idx, diagonal k = diag_idx means pairs where |i - j| = k
-            // Walk: (diag_idx+1, 1), (diag_idx+2, 2), ...
-            let k = diag_idx;
-            if k < n_subs {
-                let mut qt = ts[k..k + m]
-                    .iter()
-                    .zip(&ts[0..m])
-                    .map(|(a, b)| a * b)
-                    .sum::<f64>();
-
-                for p in 1..(n_subs - k).min(n_subs) {
-                    let i = p + k;
-                    let j = p;
-                    if i >= n_subs {
-                        break;
-                    }
-                    qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
-                    let d = M::qt_to_distance(qt, i, j, m, &ctx);
-                    if j.abs_diff(i) > exclusion_zone {
-                        mp.update(i, d, j);
-                        mp.update(j, d, i);
-                    }
-                }
-            }
+            propagate_diagonal::<M>(ts, &mut mp, diag_idx, m, n_subs, exclusion_zone, &ctx);
         }
     }
 

@@ -28,6 +28,73 @@ fn compute_distance_profile(ts: &[f64], idx: usize, m: usize, ctx: &RollingStats
         .collect()
 }
 
+/// Greedily select `k` snippets from candidate profiles that minimize combined area.
+/// Returns (selected_indices, selected_profiles, areas).
+fn greedy_selection(
+    profiles: &[Vec<f64>],
+    candidate_indices: &[usize],
+    n_subs: usize,
+    k: usize,
+) -> (Vec<usize>, Vec<Vec<f64>>, Vec<f64>) {
+    let s = profiles.len();
+    let mut result_indices = Vec::with_capacity(k);
+    let mut result_profiles = Vec::with_capacity(k);
+    let mut result_areas = Vec::with_capacity(k);
+    let mut used = vec![false; s];
+    let mut q = vec![f64::INFINITY; n_subs];
+
+    for _ in 0..k {
+        let best_candidate = (0..s)
+            .filter(|&c| !used[c])
+            .min_by(|&a, &b| {
+                let area_a: f64 = q.iter().zip(&profiles[a]).map(|(&qi, &di)| qi.min(di)).sum();
+                let area_b: f64 = q.iter().zip(&profiles[b]).map(|(&qi, &di)| qi.min(di)).sum();
+                area_a.partial_cmp(&area_b).unwrap()
+            })
+            .unwrap();
+
+        let area: f64 = q
+            .iter()
+            .zip(&profiles[best_candidate])
+            .map(|(&qi, &di)| qi.min(di))
+            .sum();
+
+        used[best_candidate] = true;
+        result_indices.push(candidate_indices[best_candidate]);
+        result_profiles.push(profiles[best_candidate].clone());
+        result_areas.push(area);
+
+        for (qi, &di) in q.iter_mut().zip(&profiles[best_candidate]) {
+            *qi = qi.min(di);
+        }
+    }
+
+    (result_indices, result_profiles, result_areas)
+}
+
+/// Assign each position to its nearest snippet, return (regimes, fractions).
+fn compute_regimes(selected_profiles: &[Vec<f64>], n_subs: usize) -> (Vec<usize>, Vec<f64>) {
+    let k = selected_profiles.len();
+    let regimes: Vec<usize> = (0..n_subs)
+        .map(|j| {
+            selected_profiles
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a[j].partial_cmp(&b[j]).unwrap())
+                .unwrap()
+                .0
+        })
+        .collect();
+
+    let mut counts = vec![0usize; k];
+    for &r in &regimes {
+        counts[r] += 1;
+    }
+    let fractions: Vec<f64> = counts.iter().map(|&c| c as f64 / n_subs as f64).collect();
+
+    (regimes, fractions)
+}
+
 /// Extract `k` representative subsequences (snippets) that best summarize the time series.
 ///
 /// Implements the snippets algorithm (Imani et al., "Matrix Profile XIII: Time Series
@@ -50,7 +117,6 @@ pub fn find_snippets(ts: &[f64], m: usize, k: usize) -> SnippetsResult {
     assert!(n >= 2 * m, "Time series must be at least 2*m long");
     let n_subs = n - m + 1;
 
-    // Number of non-overlapping candidate windows
     let s = n_subs / m;
     assert!(k > 0, "Must request at least 1 snippet");
     assert!(
@@ -58,84 +124,22 @@ pub fn find_snippets(ts: &[f64], m: usize, k: usize) -> SnippetsResult {
         "Cannot extract more snippets than candidate windows (k={k} > s={s})"
     );
 
-    // Candidate indices: 0, m, 2m, ..., (s-1)*m
     let candidate_indices: Vec<usize> = (0..s).map(|i| i * m).collect();
-
-    // Precompute rolling statistics
     let ctx = ZNormalizedEuclidean::precompute(ts, m);
-
-    // Compute distance profiles for all candidates
     let profiles: Vec<Vec<f64>> = candidate_indices
         .iter()
         .map(|&idx| compute_distance_profile(ts, idx, m, &ctx))
         .collect();
 
-    // Greedy snippet selection
-    let mut result_indices = Vec::with_capacity(k);
-    let mut result_profiles = Vec::with_capacity(k);
-    let mut result_areas = Vec::with_capacity(k);
-    let mut used = vec![false; s];
-
-    // Q tracks the element-wise minimum distance across selected snippets.
-    // Starts at infinity so the first snippet's area = sum(D[best]).
-    let mut q = vec![f64::INFINITY; n_subs];
-
-    for _ in 0..k {
-        let mut best_area = f64::INFINITY;
-        let mut best_candidate = 0;
-
-        for c in 0..s {
-            if used[c] {
-                continue;
-            }
-            let area: f64 = q
-                .iter()
-                .zip(&profiles[c])
-                .map(|(&qi, &di)| qi.min(di))
-                .sum();
-            if area < best_area {
-                best_area = area;
-                best_candidate = c;
-            }
-        }
-
-        used[best_candidate] = true;
-        result_indices.push(candidate_indices[best_candidate]);
-        result_profiles.push(profiles[best_candidate].clone());
-        result_areas.push(best_area);
-
-        // Update Q with the selected snippet's profile
-        for (qi, &di) in q.iter_mut().zip(&profiles[best_candidate]) {
-            *qi = qi.min(di);
-        }
-    }
-
-    // Compute regimes: per-position nearest snippet assignment
-    let mut regimes = vec![0usize; n_subs];
-    for j in 0..n_subs {
-        let mut best_dist = f64::INFINITY;
-        let mut best_snippet = 0;
-        for (si, profile) in result_profiles.iter().enumerate() {
-            if profile[j] < best_dist {
-                best_dist = profile[j];
-                best_snippet = si;
-            }
-        }
-        regimes[j] = best_snippet;
-    }
-
-    // Compute fractions: fraction of positions each snippet is nearest
-    let mut counts = vec![0usize; k];
-    for &r in &regimes {
-        counts[r] += 1;
-    }
-    let fractions: Vec<f64> = counts.iter().map(|&c| c as f64 / n_subs as f64).collect();
+    let (indices, selected_profiles, areas) =
+        greedy_selection(&profiles, &candidate_indices, n_subs, k);
+    let (regimes, fractions) = compute_regimes(&selected_profiles, n_subs);
 
     SnippetsResult {
-        indices: result_indices,
-        profiles: result_profiles,
+        indices,
+        profiles: selected_profiles,
         fractions,
-        areas: result_areas,
+        areas,
         regimes,
     }
 }

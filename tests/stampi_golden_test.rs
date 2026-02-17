@@ -1,6 +1,6 @@
-use motif_rs::{MatrixProfileConfig, ZNormalizedEuclidean};
 use motif_rs::algorithms::stampi::Stampi;
 use motif_rs::algorithms::stomp::stomp;
+use motif_rs::{MatrixProfileConfig, ZNormalizedEuclidean};
 use serde::Deserialize;
 use std::fs;
 
@@ -78,8 +78,7 @@ fn test_stampi_grow_matches_batch_on_full_series() {
     let config = MatrixProfileConfig::new(golden.m);
 
     // Build streaming profile
-    let mut stampi =
-        Stampi::<ZNormalizedEuclidean>::new(&golden.ts_initial, config.clone(), false);
+    let mut stampi = Stampi::<ZNormalizedEuclidean>::new(&golden.ts_initial, config.clone(), false);
     for &val in &golden.ts_stream {
         stampi.update(val);
     }
@@ -115,8 +114,7 @@ fn test_streaming_profile_vs_stumpy_streaming() {
     let golden = load_streaming_golden();
     let config = MatrixProfileConfig::new(golden.m);
 
-    let mut stampi =
-        Stampi::<ZNormalizedEuclidean>::new(&golden.ts_initial, config.clone(), false);
+    let mut stampi = Stampi::<ZNormalizedEuclidean>::new(&golden.ts_initial, config.clone(), false);
     for &val in &golden.ts_stream {
         stampi.update(val);
     }

@@ -19,9 +19,7 @@ const EPSILON: f64 = 1e-6;
 fn load_golden(filename: &str) -> GoldenData {
     let path = format!("tests/golden_data/{filename}");
     let data = fs::read_to_string(&path).unwrap_or_else(|_| {
-        panic!(
-            "Golden data file not found: {path}. Run: python scripts/generate_golden_data.py"
-        )
+        panic!("Golden data file not found: {path}. Run: python scripts/generate_golden_data.py")
     });
     serde_json::from_str(&data).unwrap()
 }
@@ -68,11 +66,7 @@ fn assert_profile_match(name: &str, rust_profile: &[f64], stumpy_profile: &[f64]
 
 fn run_golden_test(filename: &str) {
     let golden = load_golden(filename);
-    eprintln!(
-        "Testing {filename}: n={}, m={}",
-        golden.ts.len(),
-        golden.m
-    );
+    eprintln!("Testing {filename}: n={}, m={}", golden.ts.len(), golden.m);
 
     let engine = EuclideanEngine::new(MatrixProfileConfig::new(golden.m));
     let mp = engine.compute(&golden.ts);

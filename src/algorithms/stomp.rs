@@ -74,7 +74,7 @@ pub fn stomp<M: DistanceMetric>(ts: &[f64], config: &MatrixProfileConfig) -> Mat
 /// - Each diagonal is independent → naturally parallel
 /// - Better cache locality (sequential access along diagonals)
 /// - Exclusion zone handled by skipping diagonals `k <= exclusion_zone`
-#[allow(dead_code)]
+#[allow(dead_code, clippy::needless_range_loop)]
 fn stomp_diagonal<M: DistanceMetric>(
     ts: &[f64],
     m: usize,
@@ -89,11 +89,13 @@ fn stomp_diagonal<M: DistanceMetric>(
         let diag_len = n_subs - k;
         let mut qt = qt_first[k];
 
-        for i in 0..diag_len {
+        let d = M::qt_to_distance(qt, 0, k, m, ctx);
+        mp.update(0, d, k);
+        mp.update(k, d, 0);
+
+        for i in 1..diag_len {
             let j = i + k;
-            if i > 0 {
-                qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
-            }
+            qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
             let d = M::qt_to_distance(qt, i, j, m, ctx);
             mp.update(i, d, j);
             mp.update(j, d, i);
@@ -131,8 +133,7 @@ fn compute_diagonal_ranges(
         let target = if c == n_chunks {
             n_diags
         } else {
-            let threshold =
-                (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
+            let threshold = (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
             let mut lo = prev;
             let mut hi = n_diags;
             while lo < hi {
@@ -160,7 +161,7 @@ fn compute_diagonal_ranges(
 /// Pre-allocates exactly `n_threads` MatrixProfile accumulators (instead of the
 /// ~128-256 created by rayon's `fold`/`reduce`), with weight-balanced diagonal
 /// partitioning so each thread gets approximately equal total work.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::needless_range_loop)]
 #[cfg(feature = "parallel")]
 fn stomp_diagonal_parallel<M: DistanceMetric>(
     ts: &[f64],
@@ -183,11 +184,13 @@ fn stomp_diagonal_parallel<M: DistanceMetric>(
             for k in start_k..end_k {
                 let mut qt = qt_first[k];
 
-                for i in 0..(n_subs - k) {
+                let d = M::qt_to_distance(qt, 0, k, m, ctx);
+                local_mp.update(0, d, k);
+                local_mp.update(k, d, 0);
+
+                for i in 1..(n_subs - k) {
                     let j = i + k;
-                    if i > 0 {
-                        qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
-                    }
+                    qt = qt - ts[i - 1] * ts[j - 1] + ts[i + m - 1] * ts[j + m - 1];
                     let d = M::qt_to_distance(qt, i, j, m, ctx);
                     local_mp.update(i, d, j);
                     local_mp.update(j, d, i);
@@ -212,21 +215,31 @@ fn stomp_diagonal_parallel<M: DistanceMetric>(
 // - Multi-diagonal grouping (4 adjacent diagonals) for SIMD opportunities
 // ---------------------------------------------------------------------------
 
+/// Read-only context shared by all correlation-domain inner loop helpers.
+struct CorrCtx<'a> {
+    ts: &'a [f64],
+    m: usize,
+    n_subs: usize,
+    qt_first: &'a [f64],
+    mean: &'a [f64],
+    m_sigma_inv: &'a [f64],
+    m_mean: &'a [f64],
+}
+
 /// Process a single diagonal (branchless, no constant-subsequence checks).
 ///
 /// Uses FMA, hoisted p=0, and unchecked indexing.
 #[inline(always)]
-fn diagonal_single_branchless(
-    ts: &[f64],
-    m: usize,
-    n_subs: usize,
-    qt_first: &[f64],
-    mean: &[f64],
-    m_sigma_inv: &[f64],
-    m_mean: &[f64],
-    k: usize,
-    acc: &mut ProfileAccumulator,
-) {
+fn diagonal_single_branchless(cx: &CorrCtx<'_>, k: usize, acc: &mut ProfileAccumulator) {
+    let CorrCtx {
+        ts,
+        m,
+        n_subs,
+        qt_first,
+        mean,
+        m_sigma_inv,
+        m_mean,
+    } = *cx;
     debug_assert!(k < n_subs);
     let diag_len = n_subs - k;
 
@@ -267,17 +280,17 @@ fn diagonal_single_branchless(
 /// `ts[j-1..j+2]` and `ts[j+m-1..j+m+2]` are consecutive loads —
 /// enabling the compiler to use packed AVX2 operations.
 #[inline(always)]
-fn diagonal_group4_branchless(
-    ts: &[f64],
-    m: usize,
-    n_subs: usize,
-    qt_first: &[f64],
-    mean: &[f64],
-    m_sigma_inv: &[f64],
-    m_mean: &[f64],
-    k: usize,
-    acc: &mut ProfileAccumulator,
-) {
+#[allow(clippy::needless_range_loop)]
+fn diagonal_group4_branchless(cx: &CorrCtx<'_>, k: usize, acc: &mut ProfileAccumulator) {
+    let CorrCtx {
+        ts,
+        m,
+        n_subs,
+        qt_first,
+        mean,
+        m_sigma_inv,
+        m_mean,
+    } = *cx;
     debug_assert!(k + 3 < n_subs);
     let min_diag_len = n_subs - (k + 3);
 
@@ -296,9 +309,8 @@ fn diagonal_group4_branchless(
         let si0 = *m_sigma_inv.get_unchecked(0);
         for d in 0..4usize {
             let kd = k + d;
-            let neg_r = mm0.mul_add(*mean.get_unchecked(kd), -qt[d])
-                * si0
-                * *m_sigma_inv.get_unchecked(kd);
+            let neg_r =
+                mm0.mul_add(*mean.get_unchecked(kd), -qt[d]) * si0 * *m_sigma_inv.get_unchecked(kd);
             acc.update_right(0, neg_r, kd);
             acc.update_left(kd, neg_r, 0);
         }
@@ -317,9 +329,8 @@ fn diagonal_group4_branchless(
                 let j = j_base + d;
                 qt[d] = neg_a.mul_add(*ts.get_unchecked(j - 1), qt[d]);
                 qt[d] = c.mul_add(*ts.get_unchecked(j + m - 1), qt[d]);
-                let neg_r = mm.mul_add(*mean.get_unchecked(j), -qt[d])
-                    * si
-                    * *m_sigma_inv.get_unchecked(j);
+                let neg_r =
+                    mm.mul_add(*mean.get_unchecked(j), -qt[d]) * si * *m_sigma_inv.get_unchecked(j);
                 acc.update_right(p, neg_r, j);
                 acc.update_left(j, neg_r, p);
             }
@@ -333,8 +344,7 @@ fn diagonal_group4_branchless(
             for p in min_diag_len..diag_len {
                 let j = p + kd;
                 qt_d = (-*ts.get_unchecked(p - 1)).mul_add(*ts.get_unchecked(j - 1), qt_d);
-                qt_d =
-                    (*ts.get_unchecked(p + m - 1)).mul_add(*ts.get_unchecked(j + m - 1), qt_d);
+                qt_d = (*ts.get_unchecked(p + m - 1)).mul_add(*ts.get_unchecked(j + m - 1), qt_d);
                 let neg_r = (*m_mean.get_unchecked(p)).mul_add(*mean.get_unchecked(j), -qt_d)
                     * *m_sigma_inv.get_unchecked(p)
                     * *m_sigma_inv.get_unchecked(j);
@@ -350,17 +360,16 @@ fn diagonal_group4_branchless(
 /// Uses FMA, hoisted p=0, and unchecked indexing, but checks m_sigma_inv
 /// for zeros (constant subsequences).
 #[inline(always)]
-fn diagonal_single_branching(
-    ts: &[f64],
-    m: usize,
-    n_subs: usize,
-    qt_first: &[f64],
-    mean: &[f64],
-    m_sigma_inv: &[f64],
-    m_mean: &[f64],
-    k: usize,
-    acc: &mut ProfileAccumulator,
-) {
+fn diagonal_single_branching(cx: &CorrCtx<'_>, k: usize, acc: &mut ProfileAccumulator) {
+    let CorrCtx {
+        ts,
+        m,
+        n_subs,
+        qt_first,
+        mean,
+        m_sigma_inv,
+        m_mean,
+    } = *cx;
     debug_assert!(k < n_subs);
     let diag_len = n_subs - k;
 
@@ -404,13 +413,7 @@ fn diagonal_single_branching(
 /// Process a range of diagonals using the branchless path with 4-wide grouping.
 #[inline(always)]
 fn process_diags_branchless(
-    ts: &[f64],
-    m: usize,
-    n_subs: usize,
-    qt_first: &[f64],
-    mean: &[f64],
-    m_sigma_inv: &[f64],
-    m_mean: &[f64],
+    cx: &CorrCtx<'_>,
     start_k: usize,
     end_k: usize,
     acc: &mut ProfileAccumulator,
@@ -418,12 +421,12 @@ fn process_diags_branchless(
     let mut k = start_k;
     // Process groups of 4 adjacent diagonals
     while k + 4 <= end_k {
-        diagonal_group4_branchless(ts, m, n_subs, qt_first, mean, m_sigma_inv, m_mean, k, acc);
+        diagonal_group4_branchless(cx, k, acc);
         k += 4;
     }
     // Remaining 0-3 diagonals
     while k < end_k {
-        diagonal_single_branchless(ts, m, n_subs, qt_first, mean, m_sigma_inv, m_mean, k, acc);
+        diagonal_single_branchless(cx, k, acc);
         k += 1;
     }
 }
@@ -431,19 +434,13 @@ fn process_diags_branchless(
 /// Process a range of diagonals using the branching path (handles constants).
 #[inline(always)]
 fn process_diags_branching(
-    ts: &[f64],
-    m: usize,
-    n_subs: usize,
-    qt_first: &[f64],
-    mean: &[f64],
-    m_sigma_inv: &[f64],
-    m_mean: &[f64],
+    cx: &CorrCtx<'_>,
     start_k: usize,
     end_k: usize,
     acc: &mut ProfileAccumulator,
 ) {
     for k in start_k..end_k {
-        diagonal_single_branching(ts, m, n_subs, qt_first, mean, m_sigma_inv, m_mean, k, acc);
+        diagonal_single_branching(cx, k, acc);
     }
 }
 
@@ -474,35 +471,22 @@ fn stomp_diagonal_corr<M: DistanceMetric>(
     let m_f = m as f64;
     let m_mean: Vec<f64> = mean.iter().map(|&mu| m_f * mu).collect();
 
+    let cx = CorrCtx {
+        ts,
+        m,
+        n_subs,
+        qt_first: &qt_first,
+        mean,
+        m_sigma_inv,
+        m_mean: &m_mean,
+    };
     let mut acc = ProfileAccumulator::new(n_subs);
     let first_k = exclusion_zone + 1;
 
     if !has_constant {
-        process_diags_branchless(
-            ts,
-            m,
-            n_subs,
-            &qt_first,
-            mean,
-            m_sigma_inv,
-            &m_mean,
-            first_k,
-            n_subs,
-            &mut acc,
-        );
+        process_diags_branchless(&cx, first_k, n_subs, &mut acc);
     } else {
-        process_diags_branching(
-            ts,
-            m,
-            n_subs,
-            &qt_first,
-            mean,
-            m_sigma_inv,
-            &m_mean,
-            first_k,
-            n_subs,
-            &mut acc,
-        );
+        process_diags_branching(&cx, first_k, n_subs, &mut acc);
     }
 
     let two_m = 2.0 * m_f;
@@ -528,6 +512,15 @@ fn stomp_diagonal_corr_parallel<M: DistanceMetric>(
     let m_f = m as f64;
     let m_mean: Vec<f64> = mean.iter().map(|&mu| m_f * mu).collect();
 
+    let cx = CorrCtx {
+        ts,
+        m,
+        n_subs,
+        qt_first: &qt_first,
+        mean,
+        m_sigma_inv,
+        m_mean: &m_mean,
+    };
     let n_threads = rayon::current_num_threads();
     let ranges = compute_diagonal_ranges(exclusion_zone + 1, n_subs, n_threads);
 
@@ -536,31 +529,9 @@ fn stomp_diagonal_corr_parallel<M: DistanceMetric>(
         .map(|(start_k, end_k)| {
             let mut acc = ProfileAccumulator::new(n_subs);
             if !has_constant {
-                process_diags_branchless(
-                    ts,
-                    m,
-                    n_subs,
-                    &qt_first,
-                    mean,
-                    m_sigma_inv,
-                    &m_mean,
-                    start_k,
-                    end_k,
-                    &mut acc,
-                );
+                process_diags_branchless(&cx, start_k, end_k, &mut acc);
             } else {
-                process_diags_branching(
-                    ts,
-                    m,
-                    n_subs,
-                    &qt_first,
-                    mean,
-                    m_sigma_inv,
-                    &m_mean,
-                    start_k,
-                    end_k,
-                    &mut acc,
-                );
+                process_diags_branching(&cx, start_k, end_k, &mut acc);
             }
             acc
         })
@@ -622,12 +593,12 @@ fn stomp_qt<M: DistanceMetric>(
     apply_exclusion_zone(&mut dist_profile, 0, exclusion_zone);
 
     // Update MP from first row (both directions for symmetry)
-    for j in 0..n_subs {
-        if dist_profile[j] < mp.profile[j] {
-            mp.update(j, dist_profile[j], 0);
+    for (j, &d) in dist_profile.iter().enumerate() {
+        if d < mp.profile[j] {
+            mp.update(j, d, 0);
         }
-        if dist_profile[j] < mp.profile[0] {
-            mp.update(0, dist_profile[j], j);
+        if d < mp.profile[0] {
+            mp.update(0, d, j);
         }
     }
 
@@ -645,14 +616,13 @@ fn stomp_qt<M: DistanceMetric>(
         qt[0] = qt_first[i];
 
         // Convert QT to distances
-        for j in 0..n_subs {
-            dist_profile[j] = M::qt_to_distance(qt[j], i, j, m, ctx);
+        for (j, dp) in dist_profile.iter_mut().enumerate() {
+            *dp = M::qt_to_distance(qt[j], i, j, m, ctx);
         }
         apply_exclusion_zone(&mut dist_profile, i, exclusion_zone);
 
         // Update MP with symmetry exploitation
-        for j in 0..n_subs {
-            let d = dist_profile[j];
+        for (j, &d) in dist_profile.iter().enumerate() {
             mp.update(i, d, j);
             mp.update(j, d, i);
         }
@@ -672,8 +642,7 @@ fn stomp_naive<M: DistanceMetric>(
         let mut dist_profile = M::distance_profile(ts, i, m, ctx);
         apply_exclusion_zone(&mut dist_profile, i, exclusion_zone);
 
-        for j in 0..n_subs {
-            let d = dist_profile[j];
+        for (j, &d) in dist_profile.iter().enumerate() {
             mp.update(i, d, j);
         }
     }
@@ -696,7 +665,7 @@ fn stomp_qt_parallel<M: DistanceMetric>(
     let qt_first = sliding_dot_product(&ts[0..m], ts);
 
     let n_threads = rayon::current_num_threads();
-    let chunk_size = (n_subs + n_threads - 1) / n_threads;
+    let chunk_size = n_subs.div_ceil(n_threads);
 
     let result = (0..n_threads)
         .into_par_iter()
@@ -721,19 +690,17 @@ fn stomp_qt_parallel<M: DistanceMetric>(
                 if i > start {
                     // QT recurrence (right-to-left to avoid overwriting)
                     for j in (1..n_subs).rev() {
-                        qt[j] =
-                            qt[j - 1] - ts[j - 1] * ts[i - 1] + ts[j + m - 1] * ts[i + m - 1];
+                        qt[j] = qt[j - 1] - ts[j - 1] * ts[i - 1] + ts[j + m - 1] * ts[i + m - 1];
                     }
                     qt[0] = qt_first[i];
                 }
 
-                for j in 0..n_subs {
-                    dist_profile[j] = M::qt_to_distance(qt[j], i, j, m, ctx);
+                for (j, dp) in dist_profile.iter_mut().enumerate() {
+                    *dp = M::qt_to_distance(qt[j], i, j, m, ctx);
                 }
                 apply_exclusion_zone(&mut dist_profile, i, exclusion_zone);
 
-                for j in 0..n_subs {
-                    let d = dist_profile[j];
+                for (j, &d) in dist_profile.iter().enumerate() {
                     local_mp.update(i, d, j);
                     local_mp.update(j, d, i);
                 }
@@ -770,8 +737,8 @@ fn stomp_naive_parallel<M: DistanceMetric>(
             |mut local_mp, i| {
                 let mut dp = M::distance_profile(ts, i, m, ctx);
                 apply_exclusion_zone(&mut dp, i, exclusion_zone);
-                for j in 0..n_subs {
-                    local_mp.update(i, dp[j], j);
+                for (j, &d) in dp.iter().enumerate() {
+                    local_mp.update(i, d, j);
                 }
                 local_mp
             },
@@ -831,9 +798,7 @@ mod tests {
     #[test]
     fn test_stomp_symmetry() {
         // If mp[i] says nearest neighbor is j, then mp[j] should say i (or have same distance)
-        let ts = vec![
-            1.0, 3.0, 2.0, 4.0, 1.5, 3.5, 2.5, 1.0, 3.0, 2.0, 4.0, 1.0,
-        ];
+        let ts = vec![1.0, 3.0, 2.0, 4.0, 1.5, 3.5, 2.5, 1.0, 3.0, 2.0, 4.0, 1.0];
         let config = MatrixProfileConfig::new(3);
         let mp = stomp::<ZNormalizedEuclidean>(&ts, &config);
 
@@ -861,8 +826,8 @@ mod tests {
         ts[2] = 0.0;
         ts[3] = -1.0;
         // Fill middle with different pattern
-        for i in 4..10 {
-            ts[i] = (i as f64) * 0.5;
+        for (i, val) in ts.iter_mut().enumerate().take(10).skip(4) {
+            *val = (i as f64) * 0.5;
         }
         // Place same pattern at index 10
         ts[10] = 0.0;
@@ -870,8 +835,8 @@ mod tests {
         ts[12] = 0.0;
         ts[13] = -1.0;
         // Fill rest
-        for i in 14..20 {
-            ts[i] = -(i as f64) * 0.3;
+        for (i, val) in ts.iter_mut().enumerate().take(20).skip(14) {
+            *val = -(i as f64) * 0.3;
         }
 
         let config = MatrixProfileConfig::new(4);
@@ -901,24 +866,37 @@ mod tests {
             }
             (a - b).abs() < eps
         };
-        for i in 0..mp_diag.profile.len() {
+        for (i, (&pd, &pr)) in mp_diag
+            .profile
+            .iter()
+            .zip(mp_row.profile.iter())
+            .enumerate()
+        {
             assert!(
-                close(mp_diag.profile[i], mp_row.profile[i]),
-                "profile mismatch at {i}: diag={}, row={}",
-                mp_diag.profile[i],
-                mp_row.profile[i]
+                close(pd, pr),
+                "profile mismatch at {i}: diag={pd}, row={pr}"
             );
+        }
+        for (i, (&ld, &lr)) in mp_diag
+            .left_profile
+            .iter()
+            .zip(mp_row.left_profile.iter())
+            .enumerate()
+        {
             assert!(
-                close(mp_diag.left_profile[i], mp_row.left_profile[i]),
-                "left_profile mismatch at {i}: diag={}, row={}",
-                mp_diag.left_profile[i],
-                mp_row.left_profile[i]
+                close(ld, lr),
+                "left_profile mismatch at {i}: diag={ld}, row={lr}"
             );
+        }
+        for (i, (&rd, &rr)) in mp_diag
+            .right_profile
+            .iter()
+            .zip(mp_row.right_profile.iter())
+            .enumerate()
+        {
             assert!(
-                close(mp_diag.right_profile[i], mp_row.right_profile[i]),
-                "right_profile mismatch at {i}: diag={}, row={}",
-                mp_diag.right_profile[i],
-                mp_row.right_profile[i]
+                close(rd, rr),
+                "right_profile mismatch at {i}: diag={rd}, row={rr}"
             );
         }
     }
@@ -946,10 +924,9 @@ mod tests {
         let mp = stomp::<ZNormalizedEuclidean>(&ts, &config);
 
         let exclusion_zone = config.exclusion_zone();
-        for i in 0..mp.profile.len() {
-            if mp.profile[i].is_finite() {
-                let j = mp.profile_index[i];
-                let gap = if j > i { j - i } else { i - j };
+        for (i, (&d, &j)) in mp.profile.iter().zip(mp.profile_index.iter()).enumerate() {
+            if d.is_finite() {
+                let gap = j.abs_diff(i);
                 assert!(
                     gap > exclusion_zone,
                     "Match at i={i}, j={j} (gap={gap}) violates exclusion_zone={exclusion_zone}"

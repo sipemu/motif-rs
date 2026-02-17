@@ -90,8 +90,7 @@ impl<M: DistanceMetric> Stampi<M> {
         self.mp.right_profile_index.push(0);
 
         // Update: new subsequence vs all existing, and vice versa
-        for j in 0..new_n_subs {
-            let d = dist_profile[j];
+        for (j, &d) in dist_profile.iter().enumerate() {
             // Update the new entry
             self.mp.update(new_idx, d, j);
             // Update existing entries if new subsequence is closer

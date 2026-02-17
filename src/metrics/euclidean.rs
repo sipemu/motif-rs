@@ -88,7 +88,10 @@ mod tests {
         let m = 4;
         let ctx = ZNormalizedEuclidean::precompute(&ts, m);
         let d = ZNormalizedEuclidean::distance(&ts, 0, 2, m, &ctx);
-        assert!(d < 1e-6, "Shifted linear sequences should have d≈0, got {d}");
+        assert!(
+            d < 1e-6,
+            "Shifted linear sequences should have d≈0, got {d}"
+        );
     }
 
     #[test]

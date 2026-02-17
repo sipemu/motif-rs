@@ -63,7 +63,9 @@ pub fn sliding_dot_product_fft(q: &[f64], ts: &[f64]) -> Vec<f64> {
     let mut q_spectrum = fft_forward.make_output_vec();
     let mut ts_spectrum = fft_forward.make_output_vec();
     fft_forward.process(&mut q_padded, &mut q_spectrum).unwrap();
-    fft_forward.process(&mut ts_padded, &mut ts_spectrum).unwrap();
+    fft_forward
+        .process(&mut ts_padded, &mut ts_spectrum)
+        .unwrap();
 
     // Element-wise complex multiply
     for (q_val, ts_val) in q_spectrum.iter_mut().zip(ts_spectrum.iter()) {
@@ -158,11 +160,11 @@ mod tests {
         let mut profile = vec![1.0; 10];
         apply_exclusion_zone(&mut profile, 5, 2);
         // Indices 3,4,5,6,7 should be inf
-        for i in 0..10 {
+        for (i, &val) in profile.iter().enumerate() {
             if (3..=7).contains(&i) {
-                assert!(profile[i].is_infinite());
+                assert!(val.is_infinite());
             } else {
-                assert!((profile[i] - 1.0).abs() < 1e-10);
+                assert!((val - 1.0).abs() < 1e-10);
             }
         }
     }

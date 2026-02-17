@@ -299,11 +299,7 @@ impl ProfileAccumulator {
     /// The `convert` closure applies `d = sqrt(2*m*(1 + neg_corr))` (or similar)
     /// once per element — an O(n) pass that replaces the O(n^2) per-element sqrt
     /// from the inner loop.
-    pub fn write_to_matrix_profile(
-        &self,
-        mp: &mut MatrixProfile,
-        convert: impl Fn(f64) -> f64,
-    ) {
+    pub fn write_to_matrix_profile(&self, mp: &mut MatrixProfile, convert: impl Fn(f64) -> f64) {
         for (i, e) in self.entries.iter().enumerate() {
             mp.profile[i] = convert(e.neg_corr);
             mp.profile_index[i] = e.index;

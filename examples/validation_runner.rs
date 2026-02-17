@@ -12,7 +12,8 @@
 
 use motif_rs::algorithms::stampi::Stampi;
 use motif_rs::{
-    find_snippets, AampEngine, EuclideanEngine, MatrixProfileConfig, ZNormalizedEuclidean,
+    find_snippets, mpdist, ostinato, stimp, AampEngine, EuclideanEngine, MatrixProfileConfig,
+    ZNormalizedEuclidean,
 };
 use std::io::{self, Read};
 use std::time::Instant;
@@ -31,6 +32,10 @@ fn main() {
         "ab_join" => run_ab_join(&data, m),
         "topk" => run_topk(&data, m),
         "snippets" => run_snippets(&data, m),
+        "mpdist" => run_mpdist(&data, m),
+        "scrump" => run_scrump(&data, m),
+        "ostinato" => run_ostinato(&data, m),
+        "stimp" => run_stimp(&data, m),
         _ => run_batch(&data, m),
     };
 
@@ -156,6 +161,103 @@ fn run_snippets(data: &serde_json::Value, m: usize) -> serde_json::Value {
         "fractions": result.fractions,
         "areas": result.areas,
         "regimes": result.regimes,
+    })
+}
+
+fn run_mpdist(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts_a = parse_ts(data, "ts_a");
+    let ts_b = parse_ts(data, "ts_b");
+    let percentage = data["percentage"].as_f64();
+
+    let start = Instant::now();
+    let dist = mpdist::<ZNormalizedEuclidean>(&ts_a, &ts_b, m, percentage);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::mpdist",
+        "m": m,
+        "n_a": ts_a.len(),
+        "n_b": ts_b.len(),
+        "compute_s": compute_s,
+        "distance": dist,
+    })
+}
+
+fn run_scrump(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts = parse_ts(data, "ts");
+    let percentage = data["percentage"].as_f64().unwrap_or(1.0);
+
+    let engine = EuclideanEngine::new(MatrixProfileConfig::new(m));
+
+    let start = Instant::now();
+    let mp = engine.scrump(&ts, percentage);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::scrump",
+        "m": m,
+        "n": ts.len(),
+        "percentage": percentage,
+        "compute_s": compute_s,
+        "profile": sanitize_profile(&mp.profile),
+        "profile_index": mp.profile_index,
+    })
+}
+
+fn run_ostinato(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts_list_vals: Vec<Vec<f64>> = data["ts_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arr| {
+            arr.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        })
+        .collect();
+    let ts_refs: Vec<&[f64]> = ts_list_vals.iter().map(|v| v.as_slice()).collect();
+
+    let start = Instant::now();
+    let result = ostinato::<ZNormalizedEuclidean>(&ts_refs, m);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::ostinato",
+        "m": m,
+        "k": ts_refs.len(),
+        "compute_s": compute_s,
+        "radius": result.radius,
+        "ts_index": result.ts_index,
+        "subsequence_index": result.subsequence_index,
+    })
+}
+
+fn run_stimp(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts = parse_ts(data, "ts");
+    let min_m = data["min_m"].as_u64().unwrap_or(m as u64) as usize;
+    let max_m = data["max_m"].as_u64().unwrap_or(m as u64) as usize;
+    let step = data["step"].as_u64().map(|s| s as usize);
+    let percentage = data["percentage"].as_f64();
+
+    let start = Instant::now();
+    let pan = stimp::<ZNormalizedEuclidean>(&ts, min_m, max_m, step, percentage);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::stimp",
+        "m": m,
+        "min_m": min_m,
+        "max_m": max_m,
+        "n": ts.len(),
+        "compute_s": compute_s,
+        "windows": pan.windows,
+        "n_profiles": pan.profiles.len(),
     })
 }
 

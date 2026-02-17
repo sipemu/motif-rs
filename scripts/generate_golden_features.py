@@ -333,6 +333,147 @@ def generate_snippets():
     })
 
 
+def generate_mpdist():
+    """MPdist: scalar distance between two time series."""
+    print("Generating mpdist_sine_mixed.json...")
+    n_a = 500
+    n_b = 600
+    m = 30
+    np.random.seed(42)
+
+    t_a = np.linspace(0, 6 * np.pi, n_a)
+    ts_a = np.sin(t_a) + 0.1 * np.random.randn(n_a)
+
+    t_b = np.linspace(0, 8 * np.pi, n_b)
+    ts_b = np.sin(t_b) + 0.5 * np.cos(3 * t_b) + 0.1 * np.random.randn(n_b)
+
+    # Default percentage (stumpy default)
+    dist_default = float(stumpy.mpdist(ts_a, ts_b, m))
+
+    # Custom percentage
+    dist_custom = float(stumpy.mpdist(ts_a, ts_b, m, percentage=0.05))
+
+    # Self-distance (should be ~0)
+    dist_self = float(stumpy.mpdist(ts_a, ts_a, m))
+
+    save_golden("mpdist_sine_mixed.json", {
+        "description": f"MPdist: sine vs mixed signal, n_a={n_a}, n_b={n_b}, m={m}",
+        "ts_a": ts_a,
+        "ts_b": ts_b,
+        "m": m,
+        "n_a": n_a,
+        "n_b": n_b,
+        "dist_default": dist_default,
+        "dist_custom_005": dist_custom,
+        "dist_self": dist_self,
+    })
+
+
+def generate_scrump():
+    """SCRUMP: approximate matrix profile."""
+    print("Generating scrump_sine_wave.json...")
+    n = 1000
+    m = 50
+    np.random.seed(42)
+
+    t = np.linspace(0, 8 * np.pi, n)
+    ts = np.sin(t) + 0.1 * np.random.randn(n)
+
+    # Exact reference (stump)
+    exact_result = stumpy.stump(ts, m)
+    exact_profile = exact_result[:, 0].astype(float)
+
+    # SCRUMP at percentage=1.0 should match stump
+    # Note: stumpy.scrump returns an object; call .update() then .P_ for profile
+    approx = stumpy.scrump(ts, m, percentage=1.0, pre_scrump=True)
+    approx.update()
+    approx_profile = approx.P_.astype(float)
+
+    save_golden("scrump_sine_wave.json", {
+        "description": f"SCRUMP on sine wave with noise, n={n}, m={m}",
+        "ts": ts,
+        "m": m,
+        "n": n,
+        "exact_profile": exact_profile,
+        "approx_profile_100": approx_profile,
+    })
+
+
+def generate_ostinato():
+    """Ostinato: consensus motif across multiple time series."""
+    print("Generating ostinato_consensus.json...")
+    n = 300
+    m = 25
+    np.random.seed(42)
+
+    # Three series with a shared sine pattern + varying noise
+    t = np.linspace(0, 4 * np.pi, n)
+    ts0 = np.sin(t) + 0.1 * np.random.randn(n)
+    ts1 = np.sin(t + 0.5) + 0.15 * np.random.randn(n)
+    ts2 = np.sin(t + 1.0) + 0.2 * np.random.randn(n)
+
+    ts_list = [ts0, ts1, ts2]
+    result = stumpy.ostinato(ts_list, m)
+
+    # result is (radius, Ts_idx, subseq_idx)
+    radius = float(result[0])
+    ts_idx = int(result[1])
+    subseq_idx = int(result[2])
+
+    save_golden("ostinato_consensus.json", {
+        "description": f"Ostinato on 3 sine series with phase shifts, n={n}, m={m}",
+        "ts_list": [ts.tolist() for ts in ts_list],
+        "m": m,
+        "n": n,
+        "k": len(ts_list),
+        "radius": radius,
+        "ts_idx": ts_idx,
+        "subseq_idx": subseq_idx,
+    })
+
+
+def generate_stimp():
+    """STIMP: pan matrix profile across window sizes."""
+    print("Generating stimp_pan_profile.json...")
+    n = 500
+    np.random.seed(42)
+
+    t = np.linspace(0, 8 * np.pi, n)
+    ts = np.sin(t) + 0.1 * np.random.randn(n)
+
+    min_m = 10
+    max_m = 50
+
+    pan = stumpy.stimp(ts, min_m=min_m, max_m=max_m)
+
+    # pan.PAN_ is the pan matrix profile (window_sizes x n_subs, padded)
+    # We extract the profiles and windows from the object
+    windows = list(range(min_m, max_m + 1))
+    profiles = []
+    indices = []
+
+    for m in windows:
+        # Compute individual profiles for validation
+        result = stumpy.stump(ts, m)
+        profile = result[:, 0].astype(float)
+        index = result[:, 1].astype(int)
+        # Normalize: divide by sqrt(2*m) matching STIMP normalization
+        norm_profile = profile / np.sqrt(2 * m)
+        profiles.append(norm_profile.tolist())
+        indices.append(index.tolist())
+
+    save_golden("stimp_pan_profile.json", {
+        "description": f"STIMP on sine wave, n={n}, min_m={min_m}, max_m={max_m}",
+        "ts": ts,
+        "n": n,
+        "min_m": min_m,
+        "max_m": max_m,
+        "windows": windows,
+        "profiles": profiles,
+        "indices": indices,
+    })
+
+
 if __name__ == "__main__":
     print("Generating golden reference data for new features using stumpy...\n")
     generate_aamp()
@@ -342,4 +483,8 @@ if __name__ == "__main__":
     generate_discords()
     generate_fluss()
     generate_snippets()
+    generate_mpdist()
+    generate_scrump()
+    generate_ostinato()
+    generate_stimp()
     print("\nDone! Run 'cargo test' to validate against these references.")

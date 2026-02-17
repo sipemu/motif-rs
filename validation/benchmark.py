@@ -195,6 +195,119 @@ def bench_rust_snippets(ts: np.ndarray, m: int, k: int) -> float:
     return out["compute_s"]
 
 
+MPDIST_SIZES = [1_000, 5_000, 10_000]
+MPDIST_M = 100
+STIMP_SIZES = [1_000, 5_000, 10_000]
+STIMP_MIN_M = 10
+STIMP_MAX_M = 100
+STIMP_STEP = 5
+
+
+def bench_stumpy_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
+    """Benchmark stumpy.mpdist, return elapsed seconds."""
+    start = time.perf_counter()
+    stumpy.mpdist(ts_a, ts_b, m)
+    return time.perf_counter() - start
+
+
+def bench_rust_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
+    """Benchmark motif-rs mpdist, return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench", "ts_a": ts_a.tolist(), "ts_b": ts_b.tolist(), "m": m,
+        "signal_type": "mpdist",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def bench_stumpy_stimp(ts: np.ndarray, min_m: int, max_m: int) -> float:
+    """Benchmark stumpy.stimp, return elapsed seconds."""
+    start = time.perf_counter()
+    stumpy.stimp(ts, min_m=min_m, max_m=max_m)
+    return time.perf_counter() - start
+
+
+def bench_rust_stimp(ts: np.ndarray, min_m: int, max_m: int, step: int) -> float:
+    """Benchmark motif-rs stimp, return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench", "ts": ts.tolist(), "m": min_m,
+        "min_m": min_m, "max_m": max_m, "step": step,
+        "signal_type": "stimp",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=600
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def run_mpdist_benchmarks() -> list[dict]:
+    """Run MPdist benchmarks at multiple sizes."""
+    results = []
+    for n in MPDIST_SIZES:
+        ts_a = generate_signal(n, seed=42)
+        ts_b = generate_signal(n, seed=99)
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_mpdist(ts_a, ts_b, MPDIST_M))
+            rust_times.append(bench_rust_mpdist(ts_a, ts_b, MPDIST_M))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "mpdist", "n": n, "m": MPDIST_M,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  MPdist n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
+
+
+def run_stimp_benchmarks() -> list[dict]:
+    """Run STIMP benchmarks at multiple sizes."""
+    results = []
+    for n in STIMP_SIZES:
+        ts = generate_signal(n)
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_stimp(ts, STIMP_MIN_M, STIMP_MAX_M))
+            rust_times.append(bench_rust_stimp(ts, STIMP_MIN_M, STIMP_MAX_M, STIMP_STEP))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "stimp", "n": n,
+            "min_m": STIMP_MIN_M, "max_m": STIMP_MAX_M, "step": STIMP_STEP,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  STIMP n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
+
+
 def run_snippets_benchmarks() -> list[dict]:
     """Run snippets benchmarks at multiple sizes."""
     results = []
@@ -393,6 +506,8 @@ def generate_report(
     ab_join_results: list[dict] | None = None,
     topk_results: list[dict] | None = None,
     snippets_results: list[dict] | None = None,
+    mpdist_results: list[dict] | None = None,
+    stimp_results: list[dict] | None = None,
 ):
     """Generate markdown benchmark report."""
     report = []
@@ -466,6 +581,28 @@ def generate_report(
                 f"| **{r['speedup']:.1f}x** |"
             )
 
+    # MPdist
+    if mpdist_results:
+        report.append(f"\n## MPdist (m={MPDIST_M}, n_a = n_b = n)\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in mpdist_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
+    # STIMP
+    if stimp_results:
+        report.append(f"\n## STIMP — Pan Matrix Profile (min_m={STIMP_MIN_M}, max_m={STIMP_MAX_M}, step={STIMP_STEP})\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in stimp_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
     # Notes
     report.append("\n## Notes\n")
     report.append(
@@ -506,6 +643,10 @@ def generate_report(
         raw_data["topk"] = topk_results
     if snippets_results:
         raw_data["snippets"] = snippets_results
+    if mpdist_results:
+        raw_data["mpdist"] = mpdist_results
+    if stimp_results:
+        raw_data["stimp"] = stimp_results
 
     raw_path = os.path.join(RESULTS_DIR, "benchmark_raw.json")
     with open(raw_path, "w") as f:
@@ -568,9 +709,20 @@ def main():
     print(f"\nSnippets benchmarks (m={FEATURE_M}, k={SNIPPETS_K}, {N_ITERATIONS} iterations):\n")
     snippets_results = run_snippets_benchmarks()
 
+    # MPdist benchmarks
+    print(f"\nMPdist benchmarks (m={MPDIST_M}, {N_ITERATIONS} iterations):\n")
+    mpdist_results = run_mpdist_benchmarks()
+
+    # STIMP benchmarks
+    print(f"\nSTIMP benchmarks (min_m={STIMP_MIN_M}, max_m={STIMP_MAX_M}, step={STIMP_STEP}, {N_ITERATIONS} iterations):\n")
+    stimp_results = run_stimp_benchmarks()
+
     # Generate report
     print()
-    generate_report(batch_results, streaming_results, aamp_results, ab_join_results, topk_results, snippets_results)
+    generate_report(
+        batch_results, streaming_results, aamp_results, ab_join_results,
+        topk_results, snippets_results, mpdist_results, stimp_results,
+    )
 
 
 if __name__ == "__main__":

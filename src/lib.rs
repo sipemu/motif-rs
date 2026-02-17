@@ -2,8 +2,15 @@ pub mod algorithms;
 pub mod core;
 pub mod metrics;
 
+pub use crate::algorithms::ab_join::ab_join;
+pub use crate::algorithms::fluss::{fluss, Floss, SegmentationResult};
+pub use crate::algorithms::motifs::{find_discords, find_motifs, Discord, Motif};
+pub use crate::algorithms::topk::TopKMatrixProfile;
 pub use crate::core::distance_metric::DistanceMetric;
-pub use crate::core::matrix_profile::{MatrixProfile, MatrixProfileConfig, RollingStats};
+pub use crate::core::matrix_profile::{
+    JoinProfile, MatrixProfile, MatrixProfileConfig, RollingStats,
+};
+pub use crate::metrics::absolute::AbsoluteEuclidean;
 pub use crate::metrics::euclidean::ZNormalizedEuclidean;
 
 use crate::algorithms::stampi::Stampi;
@@ -47,7 +54,24 @@ impl<M: DistanceMetric> Engine<M> {
     pub fn streaming(&self, initial_ts: &[f64], egress: bool) -> Stampi<M> {
         Stampi::<M>::new(initial_ts, self.config.clone(), egress)
     }
+
+    /// Compute the AB-join between two time series.
+    ///
+    /// Returns two `JoinProfile`s: one for each series against the other.
+    pub fn ab_join(&self, ts_a: &[f64], ts_b: &[f64]) -> (JoinProfile, JoinProfile) {
+        crate::algorithms::ab_join::ab_join::<M>(ts_a, ts_b, self.config.m)
+    }
+
+    /// Compute the top-k matrix profile for a time series.
+    ///
+    /// Stores the k nearest neighbors for each subsequence, rather than just the best one.
+    pub fn compute_topk(&self, ts: &[f64], k: usize) -> TopKMatrixProfile {
+        crate::algorithms::topk::stomp_topk::<M>(ts, &self.config, k)
+    }
 }
 
 /// Convenience type alias for the most common use case.
 pub type EuclideanEngine = Engine<ZNormalizedEuclidean>;
+
+/// Convenience type alias for non-normalized (absolute) Euclidean distance.
+pub type AampEngine = Engine<AbsoluteEuclidean>;

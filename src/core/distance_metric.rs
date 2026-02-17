@@ -68,4 +68,37 @@ pub trait DistanceMetric: Clone + Send + Sync {
     ///
     /// Used by streaming algorithms (STAMPI) to avoid full recomputation.
     fn update_context(ctx: &mut Self::Context, ts: &[f64], m: usize);
+
+    // --- AB-Join methods (defaulted so existing metrics compile without changes) ---
+
+    /// Whether this metric supports AB-join (cross-series comparison).
+    fn supports_ab_join() -> bool {
+        false
+    }
+
+    /// Convert a dot product to a distance for AB-join, using two separate contexts.
+    ///
+    /// Only meaningful when `supports_ab_join()` returns true.
+    fn qt_to_distance_ab(
+        _qt: f64,
+        _i: usize,
+        _j: usize,
+        _m: usize,
+        _ctx_a: &Self::Context,
+        _ctx_b: &Self::Context,
+    ) -> f64 {
+        unimplemented!("qt_to_distance_ab not supported for this metric")
+    }
+
+    /// Extract correlation-domain data for AB-join from two separate contexts.
+    ///
+    /// Returns `(mean_a, m_sigma_inv_a, mean_b, m_sigma_inv_b, has_constant)`
+    ///
+    /// Only called when both `supports_correlation_domain()` and `supports_ab_join()` are true.
+    fn correlation_data_ab<'a>(
+        _ctx_a: &'a Self::Context,
+        _ctx_b: &'a Self::Context,
+    ) -> (&'a [f64], &'a [f64], &'a [f64], &'a [f64], bool) {
+        unreachable!("correlation_data_ab not supported for this metric")
+    }
 }

@@ -311,6 +311,115 @@ impl ProfileAccumulator {
     }
 }
 
+/// Result of an AB-join: nearest-neighbor profile for one series against another.
+#[derive(Debug, Clone)]
+pub struct JoinProfile {
+    /// Nearest-neighbor distances for each subsequence.
+    pub distances: Vec<f64>,
+    /// Index of the nearest neighbor in the *other* series.
+    pub indices: Vec<usize>,
+    /// Subsequence length used.
+    pub m: usize,
+}
+
+impl JoinProfile {
+    /// Create a new join profile initialized to infinity distances.
+    pub fn new(n_subs: usize, m: usize) -> Self {
+        Self {
+            distances: vec![f64::INFINITY; n_subs],
+            indices: vec![0; n_subs],
+            m,
+        }
+    }
+}
+
+/// Accumulator for AB-join computation.
+///
+/// Simpler than `ProfileAccumulator` since there's no left/right distinction
+/// in cross-series comparison — just overall nearest neighbor.
+pub(crate) struct JoinAccumulator {
+    pub neg_corrs: Vec<f64>,
+    pub indices: Vec<usize>,
+}
+
+impl JoinAccumulator {
+    pub fn new(n: usize) -> Self {
+        Self {
+            neg_corrs: vec![f64::INFINITY; n],
+            indices: vec![0; n],
+        }
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, idx: usize, neg_corr: f64, neighbor: usize) {
+        unsafe {
+            let curr = self.neg_corrs.get_unchecked_mut(idx);
+            if neg_corr < *curr {
+                *curr = neg_corr;
+                *self.indices.get_unchecked_mut(idx) = neighbor;
+            }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    pub fn merge(&mut self, other: &Self) {
+        for i in 0..self.neg_corrs.len() {
+            if other.neg_corrs[i] < self.neg_corrs[i] {
+                self.neg_corrs[i] = other.neg_corrs[i];
+                self.indices[i] = other.indices[i];
+            }
+        }
+    }
+
+    /// Convert to a JoinProfile, applying a distance conversion function.
+    pub fn write_to_join_profile(&self, jp: &mut JoinProfile, convert: impl Fn(f64) -> f64) {
+        for (i, (&nc, &idx)) in self.neg_corrs.iter().zip(self.indices.iter()).enumerate() {
+            jp.distances[i] = convert(nc);
+            jp.indices[i] = idx;
+        }
+    }
+}
+
+/// Accumulator for AB-join with raw distances (no correlation domain).
+pub(crate) struct JoinAccumulatorDist {
+    pub distances: Vec<f64>,
+    pub indices: Vec<usize>,
+}
+
+impl JoinAccumulatorDist {
+    pub fn new(n: usize) -> Self {
+        Self {
+            distances: vec![f64::INFINITY; n],
+            indices: vec![0; n],
+        }
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, idx: usize, dist: f64, neighbor: usize) {
+        if dist < self.distances[idx] {
+            self.distances[idx] = dist;
+            self.indices[idx] = neighbor;
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    pub fn merge(&mut self, other: &Self) {
+        for i in 0..self.distances.len() {
+            if other.distances[i] < self.distances[i] {
+                self.distances[i] = other.distances[i];
+                self.indices[i] = other.indices[i];
+            }
+        }
+    }
+
+    pub fn write_to_join_profile(&self, jp: &mut JoinProfile) {
+        for i in 0..self.distances.len() {
+            jp.distances[i] = self.distances[i];
+            jp.indices[i] = self.indices[i];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

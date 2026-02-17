@@ -65,6 +65,47 @@ impl DistanceMetric for ZNormalizedEuclidean {
     fn update_context(ctx: &mut Self::Context, ts: &[f64], m: usize) {
         ctx.extend(ts, m);
     }
+
+    fn supports_ab_join() -> bool {
+        true
+    }
+
+    fn qt_to_distance_ab(
+        qt: f64,
+        i: usize,
+        j: usize,
+        m: usize,
+        ctx_a: &Self::Context,
+        ctx_b: &Self::Context,
+    ) -> f64 {
+        let msi_a = ctx_a.m_sigma_inv[i];
+        let msi_b = ctx_b.m_sigma_inv[j];
+        let m_f = m as f64;
+
+        if msi_a == 0.0 && msi_b == 0.0 {
+            return 0.0;
+        }
+        if msi_a == 0.0 || msi_b == 0.0 {
+            return (2.0 * m_f).sqrt();
+        }
+
+        let r = (qt - m_f * ctx_a.mean[i] * ctx_b.mean[j]) * msi_a * msi_b;
+        let r_clamped = r.clamp(-1.0, 1.0);
+        (2.0 * m_f * (1.0 - r_clamped)).max(0.0).sqrt()
+    }
+
+    fn correlation_data_ab<'a>(
+        ctx_a: &'a Self::Context,
+        ctx_b: &'a Self::Context,
+    ) -> (&'a [f64], &'a [f64], &'a [f64], &'a [f64], bool) {
+        (
+            &ctx_a.mean,
+            &ctx_a.m_sigma_inv,
+            &ctx_b.mean,
+            &ctx_b.m_sigma_inv,
+            ctx_a.has_constant || ctx_b.has_constant,
+        )
+    }
 }
 
 #[cfg(test)]

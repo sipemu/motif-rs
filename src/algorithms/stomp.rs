@@ -110,7 +110,7 @@ fn stomp_diagonal<M: DistanceMetric>(
 /// Uses binary search over an analytical cumulative-work formula (same approach as
 /// stumpy's `_get_array_ranges`).
 #[cfg(feature = "parallel")]
-fn compute_diagonal_ranges(
+pub fn compute_diagonal_ranges(
     first_diag: usize,
     n_subs: usize,
     n_chunks: usize,

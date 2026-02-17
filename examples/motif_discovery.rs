@@ -8,40 +8,35 @@
 
 use motif_rs::{EuclideanEngine, MatrixProfileConfig};
 
+/// Generate a sample value at time `t` with embedded motif patterns.
+fn sample(t: f64) -> f64 {
+    let mut val = (t * std::f64::consts::TAU / 200.0).sin() * 0.3;
+
+    // Pattern A: sharp pulse at indices ~50 and ~300
+    for &center in &[50.0, 300.0] {
+        let d = (t - center).abs();
+        if d < 15.0 {
+            val += 2.0 * (-d * d / 20.0).exp();
+        }
+    }
+
+    // Pattern B: double bump at indices ~150 and ~400
+    for &center in &[150.0, 400.0] {
+        let d1 = (t - (center - 5.0)).abs();
+        let d2 = (t - (center + 5.0)).abs();
+        if d1 < 15.0 || d2 < 15.0 {
+            val += 1.5 * (-d1 * d1 / 10.0).exp() + 1.5 * (-d2 * d2 / 10.0).exp();
+        }
+    }
+
+    // Small noise
+    val + ((t * 7.1).sin() * (t * 11.3).cos()) * 0.02
+}
+
 fn main() {
-    // Create a signal with 3 embedded motifs (repeated patterns):
-    // - Pattern A (sharp pulse) appears at indices ~50 and ~300
-    // - Pattern B (double bump) appears at indices ~150 and ~400
-    // - Background is smooth sine wave + noise
     let n = 500;
     let m = 30;
-
-    let mut ts = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f64;
-        let mut val = (t * std::f64::consts::TAU / 200.0).sin() * 0.3;
-
-        // Pattern A: sharp pulse
-        for &center in &[50.0, 300.0] {
-            let d = (t - center).abs();
-            if d < 15.0 {
-                val += 2.0 * (-d * d / 20.0).exp();
-            }
-        }
-
-        // Pattern B: double bump
-        for &center in &[150.0, 400.0] {
-            let d1 = (t - (center - 5.0)).abs();
-            let d2 = (t - (center + 5.0)).abs();
-            if d1 < 15.0 || d2 < 15.0 {
-                val += 1.5 * (-d1 * d1 / 10.0).exp() + 1.5 * (-d2 * d2 / 10.0).exp();
-            }
-        }
-
-        // Small noise
-        val += ((t * 7.1).sin() * (t * 11.3).cos()) * 0.02;
-        ts.push(val);
-    }
+    let ts: Vec<f64> = (0..n).map(|i| sample(i as f64)).collect();
 
     // Compute matrix profile
     let engine = EuclideanEngine::new(MatrixProfileConfig::new(m));

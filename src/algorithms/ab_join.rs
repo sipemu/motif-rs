@@ -561,13 +561,14 @@ fn ab_join_corr<M: DistanceMetric>(
 /// are negative diagonals. Returns ranges in this unified space.
 #[cfg(feature = "parallel")]
 fn compute_ab_diagonal_ranges(n_a: usize, n_b: usize, n_chunks: usize) -> Vec<(usize, usize)> {
+    use crate::algorithms::common::balanced_ranges;
+
     let total_diags = n_b + n_a.saturating_sub(1);
     if total_diags == 0 || n_chunks == 0 {
         return vec![];
     }
-    let n_chunks = n_chunks.min(total_diags);
 
-    // Cumulative work via prefix sums (O(n_a + n_b) allocation, negligible vs O(n^2) loop)
+    // Cumulative work via prefix sums
     let mut cum_work = Vec::with_capacity(total_diags + 1);
     cum_work.push(0usize);
     for d in 0..total_diags {
@@ -579,36 +580,8 @@ fn compute_ab_diagonal_ranges(n_a: usize, n_b: usize, n_chunks: usize) -> Vec<(u
         };
         cum_work.push(cum_work[d] + w);
     }
-    let total_work = cum_work[total_diags];
 
-    let mut ranges = Vec::with_capacity(n_chunks);
-    let mut prev = 0;
-
-    for c in 1..=n_chunks {
-        let target = if c == n_chunks {
-            total_diags
-        } else {
-            let threshold = (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
-            let mut lo = prev;
-            let mut hi = total_diags;
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if cum_work[mid] >= threshold {
-                    hi = mid;
-                } else {
-                    lo = mid + 1;
-                }
-            }
-            lo
-        };
-
-        if target > prev {
-            ranges.push((prev, target));
-        }
-        prev = target;
-    }
-
-    ranges
+    balanced_ranges(&cum_work, total_diags, n_chunks)
 }
 
 /// Parallel correlation-domain AB-join with load-balanced chunking.

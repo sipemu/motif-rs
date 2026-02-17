@@ -62,6 +62,34 @@ fn assert_profile_match(name: &str, rust: &[f64], stumpy: &[f64], epsilon: f64) 
     eprintln!("  {name}: max_diff = {max_diff:.2e} (epsilon = {epsilon:.0e})");
 }
 
+fn assert_topk_match(name: &str, rust: &[Vec<f64>], stumpy: &[Vec<f64>], epsilon: f64) {
+    assert_eq!(rust.len(), stumpy.len(), "{name}: subsequence count mismatch");
+    for (i, (rd, sd)) in rust.iter().zip(stumpy).enumerate() {
+        assert_eq!(rd.len(), sd.len(), "{name}: k-count mismatch at subsequence {i}");
+    }
+
+    let (max_pos, max_diff) = rust
+        .iter()
+        .zip(stumpy)
+        .enumerate()
+        .flat_map(|(i, (rd, sd))| {
+            rd.iter()
+                .zip(sd)
+                .enumerate()
+                .filter(|(_, (r, s))| !(is_sentinel_inf(**r) && is_sentinel_inf(**s)))
+                .map(move |(j, (r, s))| ((i, j), (r - s).abs()))
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .unwrap_or(((0, 0), 0.0));
+
+    assert!(
+        max_diff < epsilon,
+        "{name}: max diff = {max_diff:.2e} at ({}, {}), epsilon={epsilon:.0e}",
+        max_pos.0, max_pos.1,
+    );
+    eprintln!("  {name}: max_diff = {max_diff:.2e} (epsilon = {epsilon:.0e})");
+}
+
 // ─── AAMP ─────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -159,32 +187,7 @@ fn test_topk_vs_stumpy() {
     assert_profile_match("topk/top1_distances", &rust_top1, &stumpy_top1, EPSILON);
 
     // Compare all k distances per subsequence
-    let mut max_diff = 0.0_f64;
-    let mut max_diff_pos = (0, 0);
-    for (i, (rd, sd)) in topk.distances.iter().zip(&golden.distances).enumerate() {
-        assert_eq!(
-            rd.len(),
-            sd.len(),
-            "topk: k-count mismatch at subsequence {i}"
-        );
-        for (j, (r, s)) in rd.iter().zip(sd).enumerate() {
-            if is_sentinel_inf(*r) && is_sentinel_inf(*s) {
-                continue;
-            }
-            let diff = (r - s).abs();
-            if diff > max_diff {
-                max_diff = diff;
-                max_diff_pos = (i, j);
-            }
-        }
-    }
-    assert!(
-        max_diff < EPSILON,
-        "topk/all_distances: max diff = {max_diff:.2e} at ({}, {}), epsilon={EPSILON:.0e}",
-        max_diff_pos.0,
-        max_diff_pos.1,
-    );
-    eprintln!("  topk/all_distances: max_diff = {max_diff:.2e} (epsilon = {EPSILON:.0e})");
+    assert_topk_match("topk/all_distances", &topk.distances, &golden.distances, EPSILON);
 }
 
 // ─── Discords ─────────────────────────────────────────────────────────────────

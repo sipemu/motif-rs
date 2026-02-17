@@ -107,53 +107,29 @@ fn stomp_diagonal<M: DistanceMetric>(
 ///
 /// Returns `Vec<(start_k, end_k)>` ranges where each chunk has approximately equal
 /// total work. Diagonal `k` has length `n_subs - k`, so earlier diagonals are longer.
-/// Uses binary search over an analytical cumulative-work formula (same approach as
-/// stumpy's `_get_array_ranges`).
+/// Uses binary search over cumulative work (same approach as stumpy's `_get_array_ranges`).
 #[cfg(feature = "parallel")]
 pub fn compute_diagonal_ranges(
     first_diag: usize,
     n_subs: usize,
     n_chunks: usize,
 ) -> Vec<(usize, usize)> {
+    use crate::algorithms::common::balanced_ranges;
+
     let n_diags = n_subs.saturating_sub(first_diag);
     if n_diags == 0 || n_chunks == 0 {
         return vec![];
     }
-    let n_chunks = n_chunks.min(n_diags);
 
-    // Cumulative work for the first `i` diagonals (starting from first_diag):
-    //   cumwork(i) = sum_{j=0}^{i-1} (n_diags - j) = i*n_diags - i*(i-1)/2
-    let cumwork = |i: usize| -> usize { i * n_diags - i * i.saturating_sub(1) / 2 };
-    let total_work = cumwork(n_diags);
+    // Analytical cumulative work: cumwork(i) = i*n_diags - i*(i-1)/2
+    let cum_work: Vec<usize> = (0..=n_diags)
+        .map(|i| i * n_diags - i * i.saturating_sub(1) / 2)
+        .collect();
 
-    let mut ranges = Vec::with_capacity(n_chunks);
-    let mut prev = 0usize;
-
-    for c in 1..=n_chunks {
-        let target = if c == n_chunks {
-            n_diags
-        } else {
-            let threshold = (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
-            let mut lo = prev;
-            let mut hi = n_diags;
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if cumwork(mid) >= threshold {
-                    hi = mid;
-                } else {
-                    lo = mid + 1;
-                }
-            }
-            lo
-        };
-
-        if target > prev {
-            ranges.push((first_diag + prev, first_diag + target));
-        }
-        prev = target;
-    }
-
-    ranges
+    balanced_ranges(&cum_work, n_diags, n_chunks)
+        .into_iter()
+        .map(|(s, e)| (first_diag + s, first_diag + e))
+        .collect()
 }
 
 /// Parallel diagonal-traversal STOMP with load-balanced chunking.

@@ -86,6 +86,55 @@ pub fn sliding_dot_product_fft(q: &[f64], ts: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Binary search for the first index where `cum_work[i] >= threshold`.
+#[cfg(feature = "parallel")]
+fn bisect_left(cum_work: &[usize], threshold: usize, lo: usize, hi: usize) -> usize {
+    let mut lo = lo;
+    let mut hi = hi;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cum_work[mid] >= threshold {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
+}
+
+/// Partition `n_items` into `n_chunks` load-balanced ranges using cumulative work.
+///
+/// `cum_work` must have length `n_items + 1` with `cum_work[0] = 0` and
+/// `cum_work[i]` = total work for items `0..i`. Returns `(start, end)` ranges
+/// with approximately equal work per chunk.
+#[cfg(feature = "parallel")]
+pub fn balanced_ranges(cum_work: &[usize], n_items: usize, n_chunks: usize) -> Vec<(usize, usize)> {
+    if n_items == 0 || n_chunks == 0 {
+        return vec![];
+    }
+    let n_chunks = n_chunks.min(n_items);
+    let total_work = cum_work[n_items];
+
+    let mut ranges = Vec::with_capacity(n_chunks);
+    let mut prev = 0;
+
+    for c in 1..=n_chunks {
+        let target = if c == n_chunks {
+            n_items
+        } else {
+            let threshold = (c as f64 * total_work as f64 / n_chunks as f64).round() as usize;
+            bisect_left(cum_work, threshold, prev, n_items)
+        };
+
+        if target > prev {
+            ranges.push((prev, target));
+        }
+        prev = target;
+    }
+
+    ranges
+}
+
 /// Apply an exclusion zone around index `idx`, setting entries within the zone to infinity.
 ///
 /// The zone covers indices `[idx - zone, idx + zone]` (clamped to bounds).

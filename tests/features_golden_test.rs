@@ -63,9 +63,17 @@ fn assert_profile_match(name: &str, rust: &[f64], stumpy: &[f64], epsilon: f64) 
 }
 
 fn assert_topk_match(name: &str, rust: &[Vec<f64>], stumpy: &[Vec<f64>], epsilon: f64) {
-    assert_eq!(rust.len(), stumpy.len(), "{name}: subsequence count mismatch");
+    assert_eq!(
+        rust.len(),
+        stumpy.len(),
+        "{name}: subsequence count mismatch"
+    );
     for (i, (rd, sd)) in rust.iter().zip(stumpy).enumerate() {
-        assert_eq!(rd.len(), sd.len(), "{name}: k-count mismatch at subsequence {i}");
+        assert_eq!(
+            rd.len(),
+            sd.len(),
+            "{name}: k-count mismatch at subsequence {i}"
+        );
     }
 
     let (max_pos, max_diff) = rust
@@ -85,7 +93,8 @@ fn assert_topk_match(name: &str, rust: &[Vec<f64>], stumpy: &[Vec<f64>], epsilon
     assert!(
         max_diff < epsilon,
         "{name}: max diff = {max_diff:.2e} at ({}, {}), epsilon={epsilon:.0e}",
-        max_pos.0, max_pos.1,
+        max_pos.0,
+        max_pos.1,
     );
     eprintln!("  {name}: max_diff = {max_diff:.2e} (epsilon = {epsilon:.0e})");
 }
@@ -187,7 +196,12 @@ fn test_topk_vs_stumpy() {
     assert_profile_match("topk/top1_distances", &rust_top1, &stumpy_top1, EPSILON);
 
     // Compare all k distances per subsequence
-    assert_topk_match("topk/all_distances", &topk.distances, &golden.distances, EPSILON);
+    assert_topk_match(
+        "topk/all_distances",
+        &topk.distances,
+        &golden.distances,
+        EPSILON,
+    );
 }
 
 // ─── Discords ─────────────────────────────────────────────────────────────────

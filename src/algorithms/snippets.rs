@@ -47,8 +47,16 @@ fn greedy_selection(
         let best_candidate = (0..s)
             .filter(|&c| !used[c])
             .min_by(|&a, &b| {
-                let area_a: f64 = q.iter().zip(&profiles[a]).map(|(&qi, &di)| qi.min(di)).sum();
-                let area_b: f64 = q.iter().zip(&profiles[b]).map(|(&qi, &di)| qi.min(di)).sum();
+                let area_a: f64 = q
+                    .iter()
+                    .zip(&profiles[a])
+                    .map(|(&qi, &di)| qi.min(di))
+                    .sum();
+                let area_b: f64 = q
+                    .iter()
+                    .zip(&profiles[b])
+                    .map(|(&qi, &di)| qi.min(di))
+                    .sum();
                 area_a.partial_cmp(&area_b).unwrap()
             })
             .unwrap();

@@ -14,11 +14,7 @@ pub struct ConsensusMotif {
 
 /// Evaluate a single candidate series: compute the max NN distance across all
 /// other series for each subsequence, and return the best (minimum max-radius).
-fn evaluate_candidate<M: DistanceMetric>(
-    ts_list: &[&[f64]],
-    c: usize,
-    m: usize,
-) -> ConsensusMotif {
+fn evaluate_candidate<M: DistanceMetric>(ts_list: &[&[f64]], c: usize, m: usize) -> ConsensusMotif {
     let n_c = ts_list[c].len() - m + 1;
     let mut max_radius = vec![0.0_f64; n_c];
 

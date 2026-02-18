@@ -12,6 +12,8 @@ Generates JSON files in tests/golden_data/ for:
 - Motif discovery
 - Discord (anomaly) detection
 - FLUSS segmentation
+- Chains (ATSC/ALLC)
+- MASS / match (pattern matching)
 """
 
 import json
@@ -474,6 +476,81 @@ def generate_stimp():
     })
 
 
+def generate_chains():
+    """Time Series Chains (ALLC) using stumpy.allc."""
+    print("Generating chains_sine_wave.json...")
+    n = 500
+    m = 25
+    np.random.seed(42)
+
+    t = np.linspace(0, 8 * np.pi, n)
+    ts = np.sin(t) + 0.01 * np.random.randn(n)
+
+    result = stumpy.stump(ts, m)
+    # Left and right profile indices (columns 2 and 3)
+    left_idx = result[:, 2].astype(int)
+    right_idx = result[:, 3].astype(int)
+
+    # stumpy.allc returns (all_chain_set, unanchored_chain)
+    all_chain_set, unanchored_chain = stumpy.allc(left_idx, right_idx)
+
+    # unanchored_chain is the longest chain
+    longest_chain = unanchored_chain.tolist()
+
+    # Convert chain set (set of frozensets) to list of sorted lists
+    all_chains = [sorted(list(chain)) for chain in all_chain_set if len(chain) >= 2]
+    all_chains.sort(key=lambda c: (-len(c), c[0]))  # longest first
+
+    save_golden("chains_sine_wave.json", {
+        "description": f"Time series chains on sine wave, n={n}, m={m}",
+        "ts": ts,
+        "m": m,
+        "n": n,
+        "profile": result[:, 0].astype(float),
+        "profile_index": result[:, 1].astype(int),
+        "left_profile_index": left_idx,
+        "right_profile_index": right_idx,
+        "longest_chain": longest_chain,
+        "all_chains": all_chains,
+    })
+
+
+def generate_match():
+    """Pattern matching using stumpy.match."""
+    print("Generating match_sine_wave.json...")
+    n = 500
+    np.random.seed(42)
+
+    t = np.linspace(0, 8 * np.pi, n)
+    ts = np.sin(t) + 0.01 * np.random.randn(n)
+
+    # Extract a query from the time series
+    query_start = 100
+    query_len = 30
+    query = ts[query_start:query_start + query_len]
+
+    # stumpy.match returns a 2D array: [[distance, index], ...]
+    matches = stumpy.match(query, ts)
+
+    match_distances = matches[:, 0].astype(float).tolist()
+    match_indices = matches[:, 1].astype(int).tolist()
+
+    # Also compute MASS distance profile for direct comparison
+    mass_profile = stumpy.mass(query, ts)
+
+    save_golden("match_sine_wave.json", {
+        "description": f"Pattern matching on sine wave, n={n}, query_len={query_len}",
+        "ts": ts,
+        "n": n,
+        "query": query,
+        "query_start": query_start,
+        "query_len": query_len,
+        "match_distances": match_distances,
+        "match_indices": match_indices,
+        "mass_profile": mass_profile.astype(float),
+    })
+
+
 if __name__ == "__main__":
     print("Generating golden reference data for new features using stumpy...\n")
     generate_aamp()
@@ -487,4 +564,6 @@ if __name__ == "__main__":
     generate_scrump()
     generate_ostinato()
     generate_stimp()
+    generate_chains()
+    generate_match()
     print("\nDone! Run 'cargo test' to validate against these references.")

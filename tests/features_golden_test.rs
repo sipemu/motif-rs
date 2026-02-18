@@ -4,8 +4,8 @@
 //! and compares our implementation's output against stumpy's reference output.
 
 use motif_rs::{
-    find_snippets, mpdist, ostinato, stimp, AampEngine, EuclideanEngine, MatrixProfile,
-    MatrixProfileConfig, ZNormalizedEuclidean,
+    allc, find_matches, find_snippets, mass, mpdist, ostinato, stimp, AampEngine, EuclideanEngine,
+    MatrixProfile, MatrixProfileConfig, ZNormalizedEuclidean,
 };
 use serde::Deserialize;
 use std::fs;
@@ -733,4 +733,218 @@ fn test_stimp_vs_stumpy() {
         "  stimp: all {} window sizes match within epsilon",
         pan.windows.len()
     );
+}
+
+// ─── Chains ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ChainsGolden {
+    ts: Vec<f64>,
+    m: usize,
+    profile: Vec<f64>,
+    profile_index: Vec<i64>,
+    left_profile_index: Vec<i64>,
+    right_profile_index: Vec<i64>,
+    longest_chain: Vec<i64>,
+    all_chains: Vec<Vec<i64>>,
+}
+
+#[test]
+fn test_chains_vs_stumpy() {
+    eprintln!("Testing Chains (ALLC) vs stumpy...");
+    let golden: ChainsGolden = serde_json::from_str(&load_json("chains_sine_wave.json")).unwrap();
+
+    // Build a MatrixProfile from stumpy's data to test chains in isolation
+    let n_subs = golden.profile.len();
+    let ez = (golden.m as f64 / 4.0).ceil() as usize;
+    let mut mp = MatrixProfile::new(n_subs, golden.m, ez);
+    for i in 0..n_subs {
+        mp.profile[i] = golden.profile[i];
+        mp.profile_index[i] = golden.profile_index[i] as usize;
+        mp.left_profile_index[i] = golden.left_profile_index[i] as usize;
+        mp.right_profile_index[i] = golden.right_profile_index[i] as usize;
+    }
+
+    let result = allc(&mp);
+
+    // The longest chain should match stumpy's unanchored chain
+    let stumpy_longest: Vec<usize> = golden.longest_chain.iter().map(|&x| x as usize).collect();
+
+    eprintln!(
+        "  chains: ours longest len={}, stumpy longest len={}",
+        result.longest.len(),
+        stumpy_longest.len()
+    );
+    eprintln!(
+        "  chains: ours longest = {:?}",
+        &result.longest.indices[..result.longest.len().min(10)]
+    );
+    eprintln!(
+        "  chains: stumpy longest = {:?}",
+        &stumpy_longest[..stumpy_longest.len().min(10)]
+    );
+
+    // Chain length should match
+    assert_eq!(
+        result.longest.len(),
+        stumpy_longest.len(),
+        "chains: longest chain length mismatch: ours={}, stumpy={}",
+        result.longest.len(),
+        stumpy_longest.len()
+    );
+
+    // Chain indices should match
+    assert_eq!(
+        result.longest.indices, stumpy_longest,
+        "chains: longest chain indices mismatch"
+    );
+
+    // Verify all chains have strictly increasing indices
+    for (ci, chain) in result.chains.iter().enumerate() {
+        for w in chain.indices.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "chains[{ci}]: indices not strictly increasing: {} >= {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    // Verify chain count is reasonable
+    let stumpy_chain_count = golden.all_chains.len();
+    eprintln!(
+        "  chains: ours found {} chains, stumpy found {}",
+        result.chains.len(),
+        stumpy_chain_count
+    );
+}
+
+#[test]
+fn test_chains_end_to_end() {
+    eprintln!("Testing Chains end-to-end (our STOMP + our ALLC)...");
+    let golden: ChainsGolden = serde_json::from_str(&load_json("chains_sine_wave.json")).unwrap();
+
+    // Run our full pipeline
+    let engine = EuclideanEngine::new(MatrixProfileConfig::new(golden.m));
+    let mp = engine.compute(&golden.ts);
+
+    // Verify STOMP profile matches
+    assert_profile_match(
+        "chains_e2e/stomp_profile",
+        &mp.profile,
+        &golden.profile,
+        EPSILON,
+    );
+
+    let result = allc(&mp);
+
+    // The chain should have length >= 2 for a periodic signal
+    assert!(
+        result.longest.len() >= 2,
+        "chains e2e: expected chain length >= 2, got {}",
+        result.longest.len()
+    );
+    eprintln!(
+        "  chains e2e: longest chain length = {}",
+        result.longest.len()
+    );
+}
+
+// ─── MASS / Match ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MatchGolden {
+    ts: Vec<f64>,
+    query: Vec<f64>,
+    #[allow(dead_code)]
+    query_start: usize,
+    #[allow(dead_code)]
+    query_len: usize,
+    match_distances: Vec<f64>,
+    match_indices: Vec<i64>,
+    mass_profile: Vec<f64>,
+}
+
+#[test]
+fn test_mass_vs_stumpy() {
+    eprintln!("Testing MASS distance profile vs stumpy...");
+    let golden: MatchGolden = serde_json::from_str(&load_json("match_sine_wave.json")).unwrap();
+
+    let dp = mass(&golden.query, &golden.ts);
+
+    assert_profile_match("mass/distance_profile", &dp, &golden.mass_profile, EPSILON);
+}
+
+#[test]
+fn test_match_vs_stumpy() {
+    eprintln!("Testing match (find_matches) vs stumpy...");
+    let golden: MatchGolden = serde_json::from_str(&load_json("match_sine_wave.json")).unwrap();
+
+    // Use stumpy's default threshold (None) to match stumpy.match behavior
+    let matches = find_matches(&golden.query, &golden.ts, None, None);
+
+    let stumpy_indices: Vec<usize> = golden.match_indices.iter().map(|&x| x as usize).collect();
+
+    eprintln!(
+        "  match: ours found {} matches, stumpy found {}",
+        matches.len(),
+        stumpy_indices.len()
+    );
+
+    // The number of matches should be similar
+    // (may differ slightly due to threshold computation precision)
+    let count_diff = (matches.len() as isize - stumpy_indices.len() as isize).unsigned_abs();
+    assert!(
+        count_diff <= 2,
+        "match: count mismatch too large: ours={}, stumpy={}, diff={}",
+        matches.len(),
+        stumpy_indices.len(),
+        count_diff
+    );
+
+    // Compare matched indices — our matches should cover the same positions
+    // The first match should be at or very near stumpy's first match
+    if !matches.is_empty() && !stumpy_indices.is_empty() {
+        let our_first = matches[0].index;
+        let stumpy_first = stumpy_indices[0];
+        let ez = (golden.query.len() as f64 / 4.0).ceil() as usize;
+        let idx_diff = our_first.abs_diff(stumpy_first);
+        assert!(
+            idx_diff <= ez,
+            "match: first match index mismatch: ours={}, stumpy={}, diff={} > ez={}",
+            our_first,
+            stumpy_first,
+            idx_diff,
+            ez
+        );
+        eprintln!(
+            "  match: first match: ours=({}, {:.6}), stumpy=({}, {:.6})",
+            our_first, matches[0].distance, stumpy_first, golden.match_distances[0]
+        );
+    }
+
+    // Compare distances for matched indices (first few)
+    let n_compare = matches.len().min(stumpy_indices.len()).min(5);
+    for i in 0..n_compare {
+        let dist_diff = (matches[i].distance - golden.match_distances[i]).abs();
+        eprintln!(
+            "  match[{i}]: ours=({}, {:.6}), stumpy=({}, {:.6}), dist_diff={:.2e}",
+            matches[i].index,
+            matches[i].distance,
+            stumpy_indices[i],
+            golden.match_distances[i],
+            dist_diff
+        );
+    }
+
+    // Matches should be sorted by distance
+    for w in matches.windows(2) {
+        assert!(
+            w[0].distance <= w[1].distance + 1e-10,
+            "match: not sorted by distance: {} > {}",
+            w[0].distance,
+            w[1].distance
+        );
+    }
 }

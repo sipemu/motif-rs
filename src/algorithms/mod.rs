@@ -1,6 +1,8 @@
 pub mod ab_join;
+pub mod chains;
 pub mod common;
 pub mod fluss;
+pub mod mass;
 pub mod motifs;
 pub mod mpdist;
 pub mod ostinato;

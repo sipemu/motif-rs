@@ -3,7 +3,9 @@ pub mod core;
 pub mod metrics;
 
 pub use crate::algorithms::ab_join::ab_join;
+pub use crate::algorithms::chains::{allc, atsc, Chain, ChainsResult};
 pub use crate::algorithms::fluss::{fluss, Floss, SegmentationResult};
+pub use crate::algorithms::mass::{find_matches, mass, Match};
 pub use crate::algorithms::motifs::{find_discords, find_motifs, Discord, Motif};
 pub use crate::algorithms::mpdist::mpdist;
 pub use crate::algorithms::ostinato::{ostinato, ConsensusMotif};

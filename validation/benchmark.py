@@ -205,6 +205,9 @@ MASS_SIZES = [1_000, 5_000, 10_000, 25_000, 50_000]
 MASS_QUERY_LEN = 100
 CHAINS_SIZES = [1_000, 5_000, 10_000, 25_000]
 CHAINS_M = 100
+MSTUMP_SIZES = [1_000, 5_000, 10_000]
+MSTUMP_M = 20
+MSTUMP_D = 3
 
 
 def bench_stumpy_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
@@ -306,6 +309,69 @@ def bench_rust_chains(ts: np.ndarray, m: int) -> float:
         raise RuntimeError(f"validation_runner failed: {result.stderr}")
     out = json.loads(result.stdout)
     return out["compute_s"]
+
+
+def generate_multi_dim_signal(n: int, d: int, seed: int = 42) -> np.ndarray:
+    """Generate a d-dimensional sine + noise test signal."""
+    np.random.seed(seed)
+    T = np.empty((d, n))
+    t = np.linspace(0, 20 * np.pi, n)
+    for i in range(d):
+        T[i] = np.sin((i + 1) * t) + 0.1 * np.random.randn(n)
+    return T
+
+
+def bench_stumpy_mstump(T: np.ndarray, m: int) -> float:
+    """Benchmark stumpy.mstump, return elapsed seconds."""
+    start = time.perf_counter()
+    stumpy.mstump(T, m)
+    return time.perf_counter() - start
+
+
+def bench_rust_mstump(T: np.ndarray, m: int) -> float:
+    """Benchmark motif-rs mstump, return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench",
+        "ts": [T[i].tolist() for i in range(T.shape[0])],
+        "m": m,
+        "signal_type": "mstump",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def run_mstump_benchmarks() -> list[dict]:
+    """Run MSTUMP benchmarks at multiple sizes."""
+    results = []
+    for n in MSTUMP_SIZES:
+        T = generate_multi_dim_signal(n, MSTUMP_D)
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_mstump(T, MSTUMP_M))
+            rust_times.append(bench_rust_mstump(T, MSTUMP_M))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "mstump", "n": n, "m": MSTUMP_M, "d": MSTUMP_D,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  MSTUMP d={MSTUMP_D} n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
 
 
 def run_mass_benchmarks() -> list[dict]:
@@ -629,6 +695,7 @@ def generate_report(
     stimp_results: list[dict] | None = None,
     mass_results: list[dict] | None = None,
     chains_results: list[dict] | None = None,
+    mstump_results: list[dict] | None = None,
 ):
     """Generate markdown benchmark report."""
     report = []
@@ -746,6 +813,17 @@ def generate_report(
                 f"| **{r['speedup']:.1f}x** |"
             )
 
+    # MSTUMP
+    if mstump_results:
+        report.append(f"\n## MSTUMP — Multi-Dimensional Matrix Profile (d={MSTUMP_D}, m={MSTUMP_M})\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in mstump_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
     # Notes
     report.append("\n## Notes\n")
     report.append(
@@ -794,6 +872,8 @@ def generate_report(
         raw_data["mass"] = mass_results
     if chains_results:
         raw_data["chains"] = chains_results
+    if mstump_results:
+        raw_data["mstump"] = mstump_results
 
     raw_path = os.path.join(RESULTS_DIR, "benchmark_raw.json")
     with open(raw_path, "w") as f:
@@ -872,12 +952,19 @@ def main():
     print(f"\nChains benchmarks (m={CHAINS_M}, {N_ITERATIONS} iterations):\n")
     chains_results = run_chains_benchmarks()
 
+    # MSTUMP benchmarks
+    print(f"\nMSTUMP benchmarks (d={MSTUMP_D}, m={MSTUMP_M}, {N_ITERATIONS} iterations):\n")
+    # Warm up stumpy mstump path
+    T_warmup = generate_multi_dim_signal(500, MSTUMP_D, seed=0)
+    stumpy.mstump(T_warmup, MSTUMP_M)
+    mstump_results = run_mstump_benchmarks()
+
     # Generate report
     print()
     generate_report(
         batch_results, streaming_results, aamp_results, ab_join_results,
         topk_results, snippets_results, mpdist_results, stimp_results,
-        mass_results, chains_results,
+        mass_results, chains_results, mstump_results,
     )
 
 

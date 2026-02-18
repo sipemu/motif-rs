@@ -108,6 +108,14 @@ Benchmarked against stumpy (Numba JIT, parallel) on sine + noise signals, 5 iter
 | 2,000 | 0.071s | 0.011s | **6.2x** |
 | 5,000 | 0.115s | 0.030s | **3.8x** |
 
+### MSTUMP (multi-dimensional, d=3, m=20)
+
+| n | stumpy | motif-rs | Speedup |
+|--:|-------:|---------:|--------:|
+| 1,000 | 0.143s | 0.036s | **3.9x** |
+| 5,000 | 1.513s | 1.011s | **1.5x** |
+| 10,000 | 5.312s | 4.740s | **1.1x** |
+
 Key optimizations: correlation-domain inner loop (deferred sqrt), precomputed inverse standard deviations, hardware FMA via `f64::mul_add`, AoS cache-line accumulator, 4-wide diagonal grouping, and unsafe bounds elision. Built with fat LTO, single codegen unit, and `target-cpu=native`.
 
 ## Installation

@@ -12,7 +12,7 @@
 
 use motif_rs::algorithms::stampi::Stampi;
 use motif_rs::{
-    allc, find_snippets, mass, mpdist, ostinato, stimp, AampEngine, EuclideanEngine,
+    allc, find_snippets, mass, mpdist, mstump, ostinato, stimp, AampEngine, EuclideanEngine,
     MatrixProfileConfig, ZNormalizedEuclidean,
 };
 use std::io::{self, Read};
@@ -38,6 +38,7 @@ fn main() {
         "stimp" => run_stimp(&data, m),
         "mass" => run_mass(&data),
         "chains" => run_chains(&data, m),
+        "mstump" => run_mstump(&data, m),
         _ => run_batch(&data, m),
     };
 
@@ -299,6 +300,37 @@ fn run_chains(data: &serde_json::Value, m: usize) -> serde_json::Value {
         "longest_chain_len": result.longest.len(),
         "longest_chain": result.longest.indices,
         "n_chains": result.chains.len(),
+    })
+}
+
+fn run_mstump(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts_list: Vec<Vec<f64>> = data["ts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arr| {
+            arr.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        })
+        .collect();
+    let ts_refs: Vec<&[f64]> = ts_list.iter().map(|v| v.as_slice()).collect();
+    let d = ts_refs.len();
+    let n = ts_refs[0].len();
+
+    let start = Instant::now();
+    let _profile = mstump(&ts_refs, m);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::mstump",
+        "m": m,
+        "d": d,
+        "n": n,
+        "compute_s": compute_s,
     })
 }
 

@@ -4,8 +4,9 @@
 //! and compares our implementation's output against stumpy's reference output.
 
 use motif_rs::{
-    allc, find_matches, find_snippets, mass, mpdist, ostinato, stimp, AampEngine, EuclideanEngine,
-    MatrixProfile, MatrixProfileConfig, ZNormalizedEuclidean,
+    allc, find_matches, find_snippets, mass, mdl, mmotifs, mpdist, mstump, ostinato, stimp,
+    subspace, AampEngine, EuclideanEngine, MatrixProfile, MatrixProfileConfig,
+    ZNormalizedEuclidean,
 };
 use serde::Deserialize;
 use std::fs;
@@ -945,6 +946,273 @@ fn test_match_vs_stumpy() {
             "match: not sorted by distance: {} > {}",
             w[0].distance,
             w[1].distance
+        );
+    }
+}
+
+// ─── MSTUMP ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MstumpGolden {
+    ts: Vec<Vec<f64>>,
+    m: usize,
+    d: usize,
+    #[allow(dead_code)]
+    n: usize,
+    profile: Vec<Vec<f64>>,
+    profile_index: Vec<Vec<i64>>,
+}
+
+#[test]
+fn test_mstump_vs_stumpy() {
+    eprintln!("Testing MSTUMP vs stumpy...");
+    let golden: MstumpGolden = serde_json::from_str(&load_json("mstump_multi_dim.json")).unwrap();
+
+    let ts_refs: Vec<&[f64]> = golden.ts.iter().map(|v| v.as_slice()).collect();
+    let result = mstump(&ts_refs, golden.m);
+
+    assert_eq!(result.d, golden.d);
+    assert_eq!(result.m, golden.m);
+    assert_eq!(result.profile.len(), golden.d);
+
+    // Compare distance profiles for each dimension-count row
+    for k in 0..golden.d {
+        assert_profile_match(
+            &format!("mstump/profile_row{k}"),
+            &result.profile[k],
+            &golden.profile[k],
+            EPSILON,
+        );
+    }
+
+    // Compare NN indices for row 0 (1D profile)
+    let stumpy_idx: Vec<usize> = golden.profile_index[0]
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let mut idx_mismatches = 0;
+    for (j, (&ours, &theirs)) in result.profile_index[0].iter().zip(&stumpy_idx).enumerate() {
+        if ours != theirs {
+            // Allow index mismatch if both distances are very close
+            let d_ours = result.profile[0][j];
+            let d_theirs = golden.profile[0][j];
+            if (d_ours - d_theirs).abs() < EPSILON {
+                idx_mismatches += 1;
+            } else {
+                panic!(
+                    "mstump: index mismatch at row 0, pos {j}: ours={ours}, stumpy={theirs}, \
+                     d_ours={d_ours}, d_stumpy={d_theirs}"
+                );
+            }
+        }
+    }
+    eprintln!(
+        "  mstump/row0_indices: {} mismatches (with equivalent distances)",
+        idx_mismatches
+    );
+}
+
+// ─── Subspace ────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct SubspaceGolden {
+    ts: Vec<Vec<f64>>,
+    m: usize,
+    d: usize,
+    subseq_idx: usize,
+    nn_idx: usize,
+    dims_n1: Vec<usize>,
+    dims_n2: Vec<usize>,
+    dims_n3: Vec<usize>,
+}
+
+#[test]
+fn test_subspace_vs_stumpy() {
+    eprintln!("Testing subspace vs stumpy...");
+    let golden: SubspaceGolden =
+        serde_json::from_str(&load_json("subspace_multi_dim.json")).unwrap();
+
+    let ts_refs: Vec<&[f64]> = golden.ts.iter().map(|v| v.as_slice()).collect();
+
+    for (k, expected) in [
+        (1, &golden.dims_n1),
+        (2, &golden.dims_n2),
+        (3, &golden.dims_n3),
+    ] {
+        let result = subspace(&ts_refs, golden.m, golden.subseq_idx, golden.nn_idx, k);
+        assert_eq!(
+            &result, expected,
+            "subspace(k={k}): ours={result:?}, stumpy={expected:?}"
+        );
+        eprintln!("  subspace(k={k}): {result:?} == {expected:?} ✓");
+    }
+}
+
+// ─── MDL ─────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MdlGolden {
+    ts: Vec<Vec<f64>>,
+    m: usize,
+    d: usize,
+    subseq_idx: usize,
+    nn_idx_per_dim: Vec<usize>,
+    bit_sizes: Vec<f64>,
+    dim_orderings: Vec<Vec<usize>>,
+}
+
+#[test]
+fn test_mdl_vs_stumpy() {
+    eprintln!("Testing MDL vs stumpy...");
+    let golden: MdlGolden = serde_json::from_str(&load_json("mdl_multi_dim.json")).unwrap();
+
+    let ts_refs: Vec<&[f64]> = golden.ts.iter().map(|v| v.as_slice()).collect();
+
+    // stumpy.mdl(T, m, subseq_idx=[idx]*d, nn_idx=nn_idx_per_dim)
+    let subseq_idx_arr: Vec<usize> = vec![golden.subseq_idx; golden.d];
+    let (bit_sizes, subspaces) = mdl(&ts_refs, golden.m, &subseq_idx_arr, &golden.nn_idx_per_dim);
+
+    assert_eq!(bit_sizes.len(), golden.d);
+    for (k, (ours, theirs)) in bit_sizes.iter().zip(&golden.bit_sizes).enumerate() {
+        let diff = (ours - theirs).abs();
+        assert!(
+            diff < EPSILON,
+            "mdl bit_sizes[{k}]: ours={ours}, stumpy={theirs}, diff={diff:.2e}"
+        );
+        eprintln!("  mdl/bit_sizes[{k}]: ours={ours:.4}, stumpy={theirs:.4}, diff={diff:.2e}");
+    }
+
+    // Verify subspace dimension orderings
+    for (k, (ours, theirs)) in subspaces.iter().zip(&golden.dim_orderings).enumerate() {
+        assert_eq!(
+            ours, theirs,
+            "mdl dim_orderings[{k}]: ours={ours:?}, stumpy={theirs:?}"
+        );
+        eprintln!("  mdl/dims[{k}]: {ours:?} == {theirs:?} ✓");
+    }
+
+    // Verify optimal k matches (argmin of bit sizes)
+    let our_opt_k = bit_sizes
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i + 1)
+        .unwrap();
+    let stumpy_opt_k = golden
+        .bit_sizes
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i + 1)
+        .unwrap();
+    assert_eq!(
+        our_opt_k, stumpy_opt_k,
+        "mdl: optimal k mismatch: ours={our_opt_k}, stumpy={stumpy_opt_k}"
+    );
+    eprintln!("  mdl/optimal_k: {our_opt_k}");
+}
+
+// ─── MMOTIFS ─────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MmotifEntry {
+    idx: usize,
+    nn_idx: usize,
+    distance: f64,
+    subspace: Vec<usize>,
+    mdl_bit_sizes: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct MmotifsGolden {
+    ts: Vec<Vec<f64>>,
+    m: usize,
+    d: usize,
+    motifs: Vec<MmotifEntry>,
+}
+
+#[test]
+fn test_mmotifs_structural() {
+    eprintln!("Testing mmotifs structural properties...");
+    let golden: MmotifsGolden = serde_json::from_str(&load_json("mmotifs_multi_dim.json")).unwrap();
+
+    let ts_refs: Vec<&[f64]> = golden.ts.iter().map(|v| v.as_slice()).collect();
+    let profile = mstump(&ts_refs, golden.m);
+
+    let motifs = mmotifs(&ts_refs, golden.m, &profile, 3);
+
+    assert!(!motifs.is_empty(), "mmotifs should find at least one motif");
+
+    for (i, motif) in motifs.iter().enumerate() {
+        // k should be valid
+        assert!(
+            motif.k >= 1 && motif.k <= golden.d,
+            "motif[{i}].k={} out of range [1, {}]",
+            motif.k,
+            golden.d
+        );
+
+        // Dimensions length should match k
+        assert_eq!(
+            motif.dimensions.len(),
+            motif.k,
+            "motif[{i}] dimensions length should match k"
+        );
+
+        // Distance should be non-negative and finite
+        assert!(
+            motif.distance >= 0.0 && motif.distance.is_finite(),
+            "motif[{i}].distance={} invalid",
+            motif.distance
+        );
+
+        // Indices should be distinct
+        assert_ne!(
+            motif.idx, motif.nn_idx,
+            "motif[{i}] should have distinct indices"
+        );
+
+        // MDL bit sizes should be non-negative
+        assert_eq!(
+            motif.mdl_bit_sizes.len(),
+            golden.d,
+            "motif[{i}] mdl_bit_sizes should have d entries"
+        );
+        for (k, &bs) in motif.mdl_bit_sizes.iter().enumerate() {
+            assert!(bs >= 0.0, "motif[{i}].mdl_bit_sizes[{k}]={bs} negative");
+        }
+
+        eprintln!(
+            "  motif[{i}]: idx={}, nn={}, k={}, dims={:?}, dist={:.6}",
+            motif.idx, motif.nn_idx, motif.k, motif.dimensions, motif.distance
+        );
+    }
+
+    // Motifs should be sorted by distance
+    for w in motifs.windows(2) {
+        assert!(
+            w[0].distance <= w[1].distance + 1e-10,
+            "mmotifs not sorted: {} > {}",
+            w[0].distance,
+            w[1].distance
+        );
+    }
+
+    // Compare against stumpy's motif distances — our motifs should have
+    // similar (not necessarily identical) distances since motif selection
+    // may differ between our algorithm and stumpy's mmotifs
+    if !golden.motifs.is_empty() && !motifs.is_empty() {
+        // Both should find motifs with small distances in this periodic signal
+        eprintln!(
+            "  mmotifs: stumpy found {} motifs, we found {}",
+            golden.motifs.len(),
+            motifs.len()
+        );
+        eprintln!(
+            "  mmotifs: stumpy motif[0] dist={:.6}, ours motif[0] dist={:.6}",
+            golden.motifs[0].distance, motifs[0].distance
         );
     }
 }

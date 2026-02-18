@@ -6,12 +6,16 @@ pub use crate::algorithms::ab_join::ab_join;
 pub use crate::algorithms::chains::{allc, atsc, Chain, ChainsResult};
 pub use crate::algorithms::fluss::{fluss, Floss, SegmentationResult};
 pub use crate::algorithms::mass::{find_matches, mass, Match};
+pub use crate::algorithms::mdl::mdl;
+pub use crate::algorithms::mmotifs::{mmotifs, MultiDimensionalMotif};
 pub use crate::algorithms::motifs::{find_discords, find_motifs, Discord, Motif};
 pub use crate::algorithms::mpdist::mpdist;
+pub use crate::algorithms::mstump::{mstump, MultiDimensionalProfile};
 pub use crate::algorithms::ostinato::{ostinato, ConsensusMotif};
 pub use crate::algorithms::scrump::scrump;
 pub use crate::algorithms::snippets::{find_snippets, SnippetsResult};
 pub use crate::algorithms::stimp::{stimp, PanMatrixProfile};
+pub use crate::algorithms::subspace::subspace;
 pub use crate::algorithms::topk::TopKMatrixProfile;
 pub use crate::core::distance_metric::DistanceMetric;
 pub use crate::core::matrix_profile::{

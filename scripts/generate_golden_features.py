@@ -551,6 +551,117 @@ def generate_match():
     })
 
 
+def generate_mstump():
+    """Multi-dimensional matrix profile."""
+    print("Generating mstump_multi_dim.json...")
+    d, n, m = 3, 300, 20
+    np.random.seed(42)
+
+    T = np.empty((d, n))
+    t = np.linspace(0, 8 * np.pi, n)
+    T[0] = np.sin(t) + 0.01 * np.random.randn(n)
+    T[1] = np.sin(2 * t) + 0.01 * np.random.randn(n)
+    T[2] = np.sin(3 * t) + 0.01 * np.random.randn(n)
+
+    mp, mpi = stumpy.mstump(T, m)
+
+    save_golden("mstump_multi_dim.json", {
+        "description": f"MSTUMP on 3-dim sine waves, d={d}, n={n}, m={m}",
+        "ts": [T[i].tolist() for i in range(d)],
+        "m": m,
+        "d": d,
+        "n": n,
+        "profile": [mp[k].astype(float).tolist() for k in range(d)],
+        "profile_index": [mpi[k].astype(int).tolist() for k in range(d)],
+    })
+
+    # Also generate subspace, mdl, and mmotifs from the same data
+    idx_col = int(np.argmin(mp[0]))
+    subseq_idx = np.full(d, idx_col, dtype=np.int64)
+    nn_idx_arr = mpi[:, idx_col].astype(np.int64)
+    nn_idx_col = int(mpi[0, idx_col])
+
+    return T, m, d, n, mp, mpi, idx_col, nn_idx_col, subseq_idx, nn_idx_arr
+
+
+def generate_subspace(T, m, d, idx_col, nn_idx_col):
+    """Subspace dimension selection."""
+    print("Generating subspace_multi_dim.json...")
+
+    # stumpy k is 0-indexed: k=0 → 1 dim, k=1 → 2 dims, k=2 → 3 dims
+    results = {}
+    for k in range(d):
+        S = stumpy.subspace(T, m, idx_col, nn_idx_col, k=k)
+        # Store as "num_dims" => dimension indices
+        results[f"dims_n{k + 1}"] = S.tolist()
+
+    save_golden("subspace_multi_dim.json", {
+        "description": f"Subspace for mstump motif pair, d={d}, m={m}",
+        "ts": [T[i].tolist() for i in range(d)],
+        "m": m,
+        "d": d,
+        "subseq_idx": idx_col,
+        "nn_idx": nn_idx_col,
+        **results,
+    })
+
+
+def generate_mdl_golden(T, m, d, subseq_idx, nn_idx_arr):
+    """MDL bit sizes."""
+    print("Generating mdl_multi_dim.json...")
+
+    result = stumpy.mdl(T, m, subseq_idx, nn_idx_arr)
+    bit_sizes = result[0]
+    dim_orderings = result[1]
+
+    save_golden("mdl_multi_dim.json", {
+        "description": f"MDL for mstump motif pair, d={d}, m={m}",
+        "ts": [T[i].tolist() for i in range(d)],
+        "m": m,
+        "d": d,
+        "subseq_idx": int(subseq_idx[0]),
+        "nn_idx_per_dim": nn_idx_arr.tolist(),
+        "bit_sizes": bit_sizes.astype(float).tolist(),
+        "dim_orderings": [order.tolist() for order in dim_orderings],
+    })
+
+
+def generate_mmotifs_golden(T, m, d, mp, mpi):
+    """Multi-dimensional motif discovery."""
+    print("Generating mmotifs_multi_dim.json...")
+
+    result = stumpy.mmotifs(T, mp, mpi, max_motifs=3, cutoffs=np.inf)
+    motif_distances = result[0]
+    motif_indices = result[1]
+    motif_subspaces = result[2]
+    motif_mdls = result[3]
+
+    # Convert to serializable format
+    motifs = []
+    for i in range(len(motif_indices)):
+        indices = motif_indices[i]
+        distances = motif_distances[i]
+        # Filter out -1 and nan entries
+        valid = [j for j in range(len(indices))
+                 if indices[j] >= 0 and not np.isnan(distances[j] if j < len(distances) else 0)]
+        if len(valid) >= 2:
+            motifs.append({
+                "idx": int(indices[0]),
+                "nn_idx": int(indices[1]),
+                "distance": float(distances[1]),
+                "subspace": motif_subspaces[i].tolist() if i < len(motif_subspaces) else [],
+                "mdl_bit_sizes": motif_mdls[i].tolist() if i < len(motif_mdls) else [],
+            })
+
+    save_golden("mmotifs_multi_dim.json", {
+        "description": f"Multi-dimensional motifs, d={d}, m={m}",
+        "ts": [T[i].tolist() for i in range(d)],
+        "m": m,
+        "d": d,
+        "motifs": motifs,
+    })
+
+
 if __name__ == "__main__":
     print("Generating golden reference data for new features using stumpy...\n")
     generate_aamp()
@@ -566,4 +677,10 @@ if __name__ == "__main__":
     generate_stimp()
     generate_chains()
     generate_match()
+
+    # Multi-dimensional features
+    T, m, d, n, mp, mpi, idx_col, nn_idx_col, subseq_idx, nn_idx_arr = generate_mstump()
+    generate_subspace(T, m, d, idx_col, nn_idx_col)
+    generate_mdl_golden(T, m, d, subseq_idx, nn_idx_arr)
+    generate_mmotifs_golden(T, m, d, mp, mpi)
     print("\nDone! Run 'cargo test' to validate against these references.")

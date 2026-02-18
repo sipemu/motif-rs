@@ -201,6 +201,10 @@ STIMP_SIZES = [1_000, 5_000, 10_000]
 STIMP_MIN_M = 10
 STIMP_MAX_M = 100
 STIMP_STEP = 1
+MASS_SIZES = [1_000, 5_000, 10_000, 25_000, 50_000]
+MASS_QUERY_LEN = 100
+CHAINS_SIZES = [1_000, 5_000, 10_000, 25_000]
+CHAINS_M = 100
 
 
 def bench_stumpy_mpdist(ts_a: np.ndarray, ts_b: np.ndarray, m: int) -> float:
@@ -255,6 +259,112 @@ def bench_rust_stimp(ts: np.ndarray, min_m: int, max_m: int, step: int) -> float
         raise RuntimeError(f"validation_runner failed: {result.stderr}")
     out = json.loads(result.stdout)
     return out["compute_s"]
+
+
+def bench_stumpy_mass(query: np.ndarray, ts: np.ndarray) -> float:
+    """Benchmark stumpy.mass, return elapsed seconds."""
+    start = time.perf_counter()
+    stumpy.mass(query, ts)
+    return time.perf_counter() - start
+
+
+def bench_rust_mass(query: np.ndarray, ts: np.ndarray) -> float:
+    """Benchmark motif-rs mass, return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench", "ts": ts.tolist(), "query": query.tolist(),
+        "m": len(query), "signal_type": "mass",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def bench_stumpy_chains(ts: np.ndarray, m: int) -> float:
+    """Benchmark stumpy stump + allc, return elapsed seconds."""
+    start = time.perf_counter()
+    result = stumpy.stump(ts, m)
+    left_idx = result[:, 2].astype(int)
+    right_idx = result[:, 3].astype(int)
+    stumpy.allc(left_idx, right_idx)
+    return time.perf_counter() - start
+
+
+def bench_rust_chains(ts: np.ndarray, m: int) -> float:
+    """Benchmark motif-rs chains (stomp + allc), return compute_s from binary."""
+    input_data = json.dumps({
+        "name": "bench", "ts": ts.tolist(), "m": m,
+        "signal_type": "chains",
+    })
+    result = subprocess.run(
+        [BINARY], input=input_data, capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"validation_runner failed: {result.stderr}")
+    out = json.loads(result.stdout)
+    return out["compute_s"]
+
+
+def run_mass_benchmarks() -> list[dict]:
+    """Run MASS benchmarks at multiple sizes."""
+    results = []
+    for n in MASS_SIZES:
+        ts = generate_signal(n)
+        query = ts[100:100 + MASS_QUERY_LEN]
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_mass(query, ts))
+            rust_times.append(bench_rust_mass(query, ts))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "mass", "n": n, "m": MASS_QUERY_LEN,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  MASS n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
+
+
+def run_chains_benchmarks() -> list[dict]:
+    """Run chains benchmarks at multiple sizes (includes STOMP + ALLC)."""
+    results = []
+    for n in CHAINS_SIZES:
+        ts = generate_signal(n)
+        stumpy_times = []
+        rust_times = []
+
+        for _ in range(N_ITERATIONS):
+            stumpy_times.append(bench_stumpy_chains(ts, CHAINS_M))
+            rust_times.append(bench_rust_chains(ts, CHAINS_M))
+
+        stumpy_median = statistics.median(stumpy_times)
+        rust_median = statistics.median(rust_times)
+        speedup = stumpy_median / rust_median if rust_median > 0 else float("inf")
+
+        result = {
+            "type": "chains", "n": n, "m": CHAINS_M,
+            "stumpy_median_s": stumpy_median, "rust_median_s": rust_median,
+            "speedup": speedup,
+        }
+        results.append(result)
+        print(
+            f"  Chains n={n:>6}: stumpy={stumpy_median:.4f}s  motif-rs={rust_median:.4f}s  "
+            f"speedup={speedup:.1f}x"
+        )
+    return results
 
 
 def run_mpdist_benchmarks() -> list[dict]:
@@ -517,6 +627,8 @@ def generate_report(
     snippets_results: list[dict] | None = None,
     mpdist_results: list[dict] | None = None,
     stimp_results: list[dict] | None = None,
+    mass_results: list[dict] | None = None,
+    chains_results: list[dict] | None = None,
 ):
     """Generate markdown benchmark report."""
     report = []
@@ -612,6 +724,28 @@ def generate_report(
                 f"| **{r['speedup']:.1f}x** |"
             )
 
+    # MASS
+    if mass_results:
+        report.append(f"\n## MASS — Distance Profile (query_len={MASS_QUERY_LEN})\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in mass_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
+    # Chains
+    if chains_results:
+        report.append(f"\n## Chains — STOMP + ALLC (m={CHAINS_M})\n")
+        report.append("| n | stumpy (s) | motif-rs (s) | Speedup |")
+        report.append("|--:|----------:|------------:|--------:|")
+        for r in chains_results:
+            report.append(
+                f"| {r['n']:,} | {r['stumpy_median_s']:.4f} | {r['rust_median_s']:.4f} "
+                f"| **{r['speedup']:.1f}x** |"
+            )
+
     # Notes
     report.append("\n## Notes\n")
     report.append(
@@ -656,6 +790,10 @@ def generate_report(
         raw_data["mpdist"] = mpdist_results
     if stimp_results:
         raw_data["stimp"] = stimp_results
+    if mass_results:
+        raw_data["mass"] = mass_results
+    if chains_results:
+        raw_data["chains"] = chains_results
 
     raw_path = os.path.join(RESULTS_DIR, "benchmark_raw.json")
     with open(raw_path, "w") as f:
@@ -726,11 +864,20 @@ def main():
     print(f"\nSTIMP benchmarks (min_m={STIMP_MIN_M}, max_m={STIMP_MAX_M}, step={STIMP_STEP}, {N_ITERATIONS} iterations):\n")
     stimp_results = run_stimp_benchmarks()
 
+    # MASS benchmarks
+    print(f"\nMASS benchmarks (query_len={MASS_QUERY_LEN}, {N_ITERATIONS} iterations):\n")
+    mass_results = run_mass_benchmarks()
+
+    # Chains benchmarks
+    print(f"\nChains benchmarks (m={CHAINS_M}, {N_ITERATIONS} iterations):\n")
+    chains_results = run_chains_benchmarks()
+
     # Generate report
     print()
     generate_report(
         batch_results, streaming_results, aamp_results, ab_join_results,
         topk_results, snippets_results, mpdist_results, stimp_results,
+        mass_results, chains_results,
     )
 
 

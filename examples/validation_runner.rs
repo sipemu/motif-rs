@@ -12,8 +12,8 @@
 
 use motif_rs::algorithms::stampi::Stampi;
 use motif_rs::{
-    find_snippets, mpdist, ostinato, stimp, AampEngine, EuclideanEngine, MatrixProfileConfig,
-    ZNormalizedEuclidean,
+    allc, find_snippets, mass, mpdist, ostinato, stimp, AampEngine, EuclideanEngine,
+    MatrixProfileConfig, ZNormalizedEuclidean,
 };
 use std::io::{self, Read};
 use std::time::Instant;
@@ -36,6 +36,8 @@ fn main() {
         "scrump" => run_scrump(&data, m),
         "ostinato" => run_ostinato(&data, m),
         "stimp" => run_stimp(&data, m),
+        "mass" => run_mass(&data),
+        "chains" => run_chains(&data, m),
         _ => run_batch(&data, m),
     };
 
@@ -258,6 +260,45 @@ fn run_stimp(data: &serde_json::Value, m: usize) -> serde_json::Value {
         "compute_s": compute_s,
         "windows": pan.windows,
         "n_profiles": pan.profiles.len(),
+    })
+}
+
+fn run_mass(data: &serde_json::Value) -> serde_json::Value {
+    let ts = parse_ts(data, "ts");
+    let query = parse_ts(data, "query");
+
+    let start = Instant::now();
+    let dp = mass(&query, &ts);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::mass",
+        "m": query.len(),
+        "n": ts.len(),
+        "compute_s": compute_s,
+        "profile": sanitize_profile(&dp),
+    })
+}
+
+fn run_chains(data: &serde_json::Value, m: usize) -> serde_json::Value {
+    let ts = parse_ts(data, "ts");
+    let engine = EuclideanEngine::new(MatrixProfileConfig::new(m));
+
+    let start = Instant::now();
+    let mp = engine.compute(&ts);
+    let result = allc(&mp);
+    let compute_s = start.elapsed().as_secs_f64();
+
+    serde_json::json!({
+        "name": data["name"],
+        "algorithm": "motif-rs::chains",
+        "m": m,
+        "n": ts.len(),
+        "compute_s": compute_s,
+        "longest_chain_len": result.longest.len(),
+        "longest_chain": result.longest.indices,
+        "n_chains": result.chains.len(),
     })
 }
 

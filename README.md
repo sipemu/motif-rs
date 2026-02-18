@@ -112,11 +112,13 @@ Benchmarked against stumpy (Numba JIT, parallel) on sine + noise signals, 5 iter
 
 | n | stumpy | motif-rs | Speedup |
 |--:|-------:|---------:|--------:|
-| 1,000 | 0.143s | 0.036s | **3.9x** |
-| 5,000 | 1.513s | 1.011s | **1.5x** |
-| 10,000 | 5.312s | 4.740s | **1.1x** |
+| 1,000 | 0.216s | 0.006s | **37x** |
+| 5,000 | 2.803s | 0.069s | **41x** |
+| 10,000 | 9.310s | 0.246s | **38x** |
+| 25,000 | 52.912s | 1.417s | **37x** |
+| 50,000 | 207.155s | 5.701s | **36x** |
 
-Key optimizations: correlation-domain inner loop (deferred sqrt), precomputed inverse standard deviations, hardware FMA via `f64::mul_add`, AoS cache-line accumulator, 4-wide diagonal grouping, and unsafe bounds elision. Built with fat LTO, single codegen unit, and `target-cpu=native`.
+Key optimizations: diagonal traversal with O(1) QT recurrence per dimension (eliminates per-row FFT calls), correlation-domain distance computation with precomputed inverse standard deviations, hardware FMA via `f64::mul_add`, parallel diagonal partitioning via rayon, and symmetry exploitation (each diagonal element updates both sides). Built with fat LTO, single codegen unit, and `target-cpu=native`.
 
 ## Installation
 

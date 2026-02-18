@@ -1,5 +1,11 @@
 use crate::algorithms::common::sliding_dot_product;
+#[cfg(feature = "parallel")]
+use crate::algorithms::stomp::compute_diagonal_ranges;
 use crate::core::matrix_profile::RollingStats;
+
+/// Minimum number of subsequences before dispatching to parallel MSTUMP.
+#[cfg(feature = "parallel")]
+const MIN_PARALLEL_SUBS: usize = 256;
 
 /// Multi-dimensional matrix profile result.
 ///
@@ -19,45 +25,54 @@ pub struct MultiDimensionalProfile {
     pub m: usize,
 }
 
-/// Compute the z-normalized distance profile for a query against a time series
-/// using precomputed rolling statistics.
-fn mass_precomputed(query: &[f64], ts: &[f64], stats: &RollingStats, m: usize) -> Vec<f64> {
-    let n_subs = ts.len() - m + 1;
-    let m_f = m as f64;
+/// Read-only context shared across diagonal processing.
+struct MstumpCtx<'a> {
+    ts: &'a [&'a [f64]],
+    stats: &'a [RollingStats],
+    qt_first: &'a [Vec<f64>],
+    d: usize,
+    m_f: f64,
+    sqrt_2m: f64,
+    n_subs: usize,
+}
 
-    let mu_q: f64 = query.iter().sum::<f64>() / m_f;
-    let sum_sq_q: f64 = query.iter().map(|x| x * x).sum::<f64>();
-    let var_q = (sum_sq_q / m_f - mu_q * mu_q).max(0.0);
-    let sigma_q = var_q.sqrt();
+/// Mutable state for profile accumulation.
+struct MstumpAcc {
+    profile: Vec<Vec<f64>>,
+    profile_index: Vec<Vec<usize>>,
+    dists: Vec<f64>,
+    qt: Vec<f64>,
+}
 
-    let qt = sliding_dot_product(query, ts);
-
-    let mut profile = vec![f64::INFINITY; n_subs];
-
-    if sigma_q < 1e-15 {
-        for (i, d) in profile.iter_mut().enumerate() {
-            if stats.std[i] < 1e-15 {
-                *d = 0.0;
-            } else {
-                *d = (2.0 * m_f).sqrt();
-            }
-        }
-    } else {
-        for (i, d) in profile.iter_mut().enumerate() {
-            if stats.std[i] < 1e-15 {
-                *d = (2.0 * m_f).sqrt();
-            } else {
-                let r = (qt[i] - m_f * mu_q * stats.mean[i]) / (m_f * sigma_q * stats.std[i]);
-                let r_clamped = r.clamp(-1.0, 1.0);
-                *d = (2.0 * m_f * (1.0 - r_clamped)).max(0.0).sqrt();
-            }
+impl MstumpAcc {
+    fn new(d: usize, n_subs: usize) -> Self {
+        Self {
+            profile: vec![vec![f64::INFINITY; n_subs]; d],
+            profile_index: vec![vec![0usize; n_subs]; d],
+            dists: vec![0.0; d],
+            qt: vec![0.0; d],
         }
     }
 
-    profile
+    /// Merge another accumulator into this one (take element-wise minimum).
+    fn merge(&mut self, other: &MstumpAcc) {
+        let d = self.profile.len();
+        let n_subs = self.profile[0].len();
+        for k in 0..d {
+            for j in 0..n_subs {
+                if other.profile[k][j] < self.profile[k][j] {
+                    self.profile[k][j] = other.profile[k][j];
+                    self.profile_index[k][j] = other.profile_index[k][j];
+                }
+            }
+        }
+    }
 }
 
 /// Compute the multi-dimensional matrix profile using MSTUMP.
+///
+/// Uses diagonal traversal with QT recurrence (like 1D STOMP) instead of
+/// per-row MASS calls, reducing complexity from O(d·n²·log n) to O(d·n²).
 ///
 /// For `d` dimensions, computes a `(d, n_subs)` matrix where row `k` contains
 /// the best `(k+1)`-dimensional cumulative average z-normalized Euclidean distance
@@ -92,55 +107,166 @@ pub fn mstump(ts: &[&[f64]], m: usize) -> MultiDimensionalProfile {
 
     let n_subs = n - m + 1;
     let ez = (m as f64 / 4.0).ceil() as usize;
+    let m_f = m as f64;
 
     // Precompute rolling stats for each dimension
     let stats: Vec<RollingStats> = ts.iter().map(|t| RollingStats::compute(t, m)).collect();
 
-    let mut profile = vec![vec![f64::INFINITY; n_subs]; d];
-    let mut profile_index = vec![vec![0usize; n_subs]; d];
+    // One FFT per dimension for initial QT (vs n_subs * d FFTs in the old approach)
+    let qt_first: Vec<Vec<f64>> = (0..d)
+        .map(|dim| sliding_dot_product(&ts[dim][0..m], ts[dim]))
+        .collect();
 
-    // For each query position, compute multi-dimensional distance profile
-    for i in 0..n_subs {
-        // Compute per-dimension distance profiles using MASS
-        let dist_profiles: Vec<Vec<f64>> = (0..d)
-            .map(|dim| {
-                let query = &ts[dim][i..i + m];
-                mass_precomputed(query, ts[dim], &stats[dim], m)
-            })
-            .collect();
+    let cx = MstumpCtx {
+        ts,
+        stats: &stats,
+        qt_first: &qt_first,
+        d,
+        m_f,
+        sqrt_2m: (2.0 * m_f).sqrt(),
+        n_subs,
+    };
 
-        // For each target position, sort across dimensions and compute cumulative average
-        for j in 0..n_subs {
-            // Exclusion zone: skip trivial self-matches
-            if i.abs_diff(j) <= ez {
-                continue;
-            }
+    let mut acc = MstumpAcc::new(d, n_subs);
 
-            // Collect distances from all dimensions at target j
-            let mut dists: Vec<f64> = dist_profiles.iter().map(|dp| dp[j]).collect();
-
-            // Sort ascending (best dimensions first)
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-            // Cumulative average: row k = mean of top (k+1) dimensions
-            let mut cum_sum = 0.0;
-            for k in 0..d {
-                cum_sum += dists[k];
-                let cum_avg = cum_sum / (k + 1) as f64;
-
-                if cum_avg < profile[k][i] {
-                    profile[k][i] = cum_avg;
-                    profile_index[k][i] = j;
-                }
-            }
-        }
+    #[cfg(feature = "parallel")]
+    if n_subs >= MIN_PARALLEL_SUBS {
+        mstump_diagonal_parallel(&cx, ez, &mut acc);
+    } else {
+        mstump_diagonal(&cx, ez, &mut acc);
     }
+    #[cfg(not(feature = "parallel"))]
+    mstump_diagonal(&cx, ez, &mut acc);
 
     MultiDimensionalProfile {
-        profile,
-        profile_index,
+        profile: acc.profile,
+        profile_index: acc.profile_index,
         d,
         m,
+    }
+}
+
+/// Process one (i, j) pair: compute per-dimension distances, sort, cumulative-average,
+/// and update both sides of the profile.
+#[inline(always)]
+fn update_position(cx: &MstumpCtx<'_>, acc: &mut MstumpAcc, i: usize, j: usize) {
+    let d = cx.d;
+
+    // Compute per-dimension z-normalized Euclidean distances
+    for dim in 0..d {
+        let si = cx.stats[dim].m_sigma_inv[i];
+        let sj = cx.stats[dim].m_sigma_inv[j];
+
+        acc.dists[dim] = if si == 0.0 && sj == 0.0 {
+            // Both constant subsequences -> identical
+            0.0
+        } else if si == 0.0 || sj == 0.0 {
+            // One constant, one not -> maximally different
+            cx.sqrt_2m
+        } else {
+            // neg_r = (m*mu_i*mu_j - QT) * m_sigma_inv_i * m_sigma_inv_j
+            let neg_r = (cx.m_f * cx.stats[dim].mean[i])
+                .mul_add(cx.stats[dim].mean[j], -acc.qt[dim])
+                * si
+                * sj;
+            (2.0 * cx.m_f * (1.0 + neg_r)).max(0.0).sqrt()
+        };
+    }
+
+    // Sort distances ascending (for small d, sort_unstable is optimal)
+    acc.dists[..d].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Cumulative average: update both (i, j) and (j, i) -- symmetric
+    let mut cum_sum = 0.0;
+    for k in 0..d {
+        cum_sum += acc.dists[k];
+        let cum_avg = cum_sum / (k + 1) as f64;
+
+        if cum_avg < acc.profile[k][i] {
+            acc.profile[k][i] = cum_avg;
+            acc.profile_index[k][i] = j;
+        }
+        if cum_avg < acc.profile[k][j] {
+            acc.profile[k][j] = cum_avg;
+            acc.profile_index[k][j] = i;
+        }
+    }
+}
+
+/// Serial diagonal-traversal MSTUMP.
+///
+/// For each diagonal k (beyond the exclusion zone), walks along the diagonal
+/// maintaining per-dimension QT values with O(1) recurrence updates.
+fn mstump_diagonal(cx: &MstumpCtx<'_>, ez: usize, acc: &mut MstumpAcc) {
+    let d = cx.d;
+    let m = cx.m_f as usize;
+
+    for k in (ez + 1)..cx.n_subs {
+        let diag_len = cx.n_subs - k;
+
+        // Initialize per-dimension QT from qt_first
+        for (dim, qf) in cx.qt_first.iter().enumerate() {
+            acc.qt[dim] = qf[k];
+        }
+
+        // p = 0: use qt_first directly
+        update_position(cx, acc, 0, k);
+
+        // p = 1..diag_len: QT recurrence per dimension
+        for p in 1..diag_len {
+            let j = p + k;
+            for dim in 0..d {
+                acc.qt[dim] = (-cx.ts[dim][p - 1]).mul_add(cx.ts[dim][j - 1], acc.qt[dim]);
+                acc.qt[dim] = cx.ts[dim][p + m - 1].mul_add(cx.ts[dim][j + m - 1], acc.qt[dim]);
+            }
+            update_position(cx, acc, p, j);
+        }
+    }
+}
+
+/// Parallel diagonal-traversal MSTUMP with load-balanced chunking.
+///
+/// Partitions diagonals across threads (same strategy as 1D parallel STOMP),
+/// each thread maintains its own accumulator, merged at the end.
+#[cfg(feature = "parallel")]
+fn mstump_diagonal_parallel(cx: &MstumpCtx<'_>, ez: usize, acc: &mut MstumpAcc) {
+    use rayon::prelude::*;
+
+    let d = cx.d;
+    let m = cx.m_f as usize;
+    let n_threads = rayon::current_num_threads();
+    let ranges = compute_diagonal_ranges(ez + 1, cx.n_subs, n_threads);
+
+    let results: Vec<MstumpAcc> = ranges
+        .into_par_iter()
+        .map(|(start_k, end_k)| {
+            let mut local = MstumpAcc::new(d, cx.n_subs);
+
+            for k in start_k..end_k {
+                for (dim, qf) in cx.qt_first.iter().enumerate() {
+                    local.qt[dim] = qf[k];
+                }
+                update_position(cx, &mut local, 0, k);
+
+                for p in 1..(cx.n_subs - k) {
+                    let j = p + k;
+                    for dim in 0..d {
+                        local.qt[dim] =
+                            (-cx.ts[dim][p - 1]).mul_add(cx.ts[dim][j - 1], local.qt[dim]);
+                        local.qt[dim] =
+                            cx.ts[dim][p + m - 1].mul_add(cx.ts[dim][j + m - 1], local.qt[dim]);
+                    }
+                    update_position(cx, &mut local, p, j);
+                }
+            }
+
+            local
+        })
+        .collect();
+
+    // Merge thread-local results
+    for result in &results {
+        acc.merge(result);
     }
 }
 

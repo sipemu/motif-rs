@@ -9,6 +9,7 @@ pub mod motifs;
 pub mod mpdist;
 pub mod mstump;
 pub mod ostinato;
+pub mod pnorm;
 pub mod scrump;
 pub mod snippets;
 pub mod stampi;

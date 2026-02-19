@@ -662,6 +662,83 @@ def generate_mmotifs_golden(T, m, d, mp, mpi):
     })
 
 
+def generate_pnorm():
+    """P-norm (Minkowski distance) AAMP for p=1 and p=3."""
+    print("Generating pnorm_p1_manhattan.json...")
+    n = 500
+    m = 30
+    np.random.seed(42)
+
+    t = np.linspace(0, 8 * np.pi, n)
+    ts = np.sin(t) + 0.1 * np.random.randn(n)
+
+    # stumpy.stump with normalize=False and p=1 gives Manhattan distance
+    result_p1 = stumpy.stump(ts, m, normalize=False, p=1.0)
+    profile_p1 = result_p1[:, 0].astype(float)
+    index_p1 = result_p1[:, 1].astype(int)
+
+    save_golden("pnorm_p1_manhattan.json", {
+        "description": f"P-norm p=1 (Manhattan) on sine wave with noise, n={n}, m={m}",
+        "ts": ts,
+        "m": m,
+        "n": n,
+        "p": 1.0,
+        "profile": profile_p1,
+        "profile_index": index_p1,
+    })
+
+    print("Generating pnorm_p3_cubic.json...")
+    result_p3 = stumpy.stump(ts, m, normalize=False, p=3.0)
+    profile_p3 = result_p3[:, 0].astype(float)
+    index_p3 = result_p3[:, 1].astype(int)
+
+    save_golden("pnorm_p3_cubic.json", {
+        "description": f"P-norm p=3 on sine wave with noise, n={n}, m={m}",
+        "ts": ts,
+        "m": m,
+        "n": n,
+        "p": 3.0,
+        "profile": profile_p3,
+        "profile_index": index_p3,
+    })
+
+    # Also generate AB-join p-norm data
+    print("Generating pnorm_ab_join_p1.json...")
+    n_a = 300
+    n_b = 400
+    m_ab = 20
+    np.random.seed(100)
+
+    t_a = np.linspace(0, 6 * np.pi, n_a)
+    ts_a = np.sin(t_a) + 0.1 * np.random.randn(n_a)
+
+    t_b = np.linspace(0, 8 * np.pi, n_b)
+    ts_b = np.sin(t_b) + 0.5 * np.cos(3 * t_b) + 0.1 * np.random.randn(n_b)
+
+    # AB-join with p=1
+    result_a = stumpy.stump(ts_a, m_ab, ts_b, ignore_trivial=False, normalize=False, p=1.0)
+    profile_a = result_a[:, 0].astype(float)
+    index_a = result_a[:, 1].astype(int)
+
+    result_b = stumpy.stump(ts_b, m_ab, ts_a, ignore_trivial=False, normalize=False, p=1.0)
+    profile_b = result_b[:, 0].astype(float)
+    index_b = result_b[:, 1].astype(int)
+
+    save_golden("pnorm_ab_join_p1.json", {
+        "description": f"P-norm AB-join p=1, n_a={n_a}, n_b={n_b}, m={m_ab}",
+        "ts_a": ts_a,
+        "ts_b": ts_b,
+        "m": m_ab,
+        "p": 1.0,
+        "n_a": n_a,
+        "n_b": n_b,
+        "profile_a": profile_a,
+        "index_a": index_a,
+        "profile_b": profile_b,
+        "index_b": index_b,
+    })
+
+
 if __name__ == "__main__":
     print("Generating golden reference data for new features using stumpy...\n")
     generate_aamp()
@@ -683,4 +760,8 @@ if __name__ == "__main__":
     generate_subspace(T, m, d, idx_col, nn_idx_col)
     generate_mdl_golden(T, m, d, subseq_idx, nn_idx_arr)
     generate_mmotifs_golden(T, m, d, mp, mpi)
+
+    # P-norm features
+    generate_pnorm()
+
     print("\nDone! Run 'cargo test' to validate against these references.")

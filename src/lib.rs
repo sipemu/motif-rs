@@ -9,9 +9,10 @@ pub use crate::algorithms::mass::{find_matches, mass, Match};
 pub use crate::algorithms::mdl::mdl;
 pub use crate::algorithms::mmotifs::{mmotifs, MultiDimensionalMotif};
 pub use crate::algorithms::motifs::{find_discords, find_motifs, Discord, Motif};
-pub use crate::algorithms::mpdist::mpdist;
+pub use crate::algorithms::mpdist::{mpdist, mpdist_pnorm};
 pub use crate::algorithms::mstump::{mstump, MultiDimensionalProfile};
 pub use crate::algorithms::ostinato::{ostinato, ConsensusMotif};
+pub use crate::algorithms::pnorm::{ab_join_pnorm, stomp_pnorm};
 pub use crate::algorithms::scrump::scrump;
 pub use crate::algorithms::snippets::{find_snippets, SnippetsResult};
 pub use crate::algorithms::stimp::{stimp, PanMatrixProfile};
@@ -19,7 +20,7 @@ pub use crate::algorithms::subspace::subspace;
 pub use crate::algorithms::topk::TopKMatrixProfile;
 pub use crate::core::distance_metric::DistanceMetric;
 pub use crate::core::matrix_profile::{
-    JoinProfile, MatrixProfile, MatrixProfileConfig, RollingStats,
+    JoinProfile, MatrixProfile, MatrixProfileConfig, RollingStats, DEFAULT_SIGMA_THRESHOLD,
 };
 pub use crate::metrics::absolute::AbsoluteEuclidean;
 pub use crate::metrics::euclidean::ZNormalizedEuclidean;
@@ -122,6 +123,30 @@ impl<M: DistanceMetric> Engine<M> {
         percentage: Option<f64>,
     ) -> PanMatrixProfile {
         crate::algorithms::stimp::stimp::<M>(ts, min_m, max_m, step, percentage)
+    }
+
+    /// Compute the matrix profile using Minkowski p-norm distance.
+    ///
+    /// For `p == 2.0`, delegates to the optimized AAMP path.
+    /// For other values of `p`, uses a diagonal recurrence.
+    /// This is AAMP-only (non-normalized); the engine's metric type `M` is ignored.
+    pub fn compute_pnorm(&self, ts: &[f64], p: f64) -> MatrixProfile {
+        crate::algorithms::pnorm::stomp_pnorm(ts, &self.config, p)
+    }
+
+    /// Compute the AB-join between two time series using Minkowski p-norm distance.
+    ///
+    /// Returns two `JoinProfile`s, one for each series.
+    /// This is AAMP-only (non-normalized); the engine's metric type `M` is ignored.
+    pub fn ab_join_pnorm(&self, ts_a: &[f64], ts_b: &[f64], p: f64) -> (JoinProfile, JoinProfile) {
+        crate::algorithms::pnorm::ab_join_pnorm(ts_a, ts_b, self.config.m, p)
+    }
+
+    /// Compute MPdist using Minkowski p-norm distance.
+    ///
+    /// This is AAMP-only (non-normalized); the engine's metric type `M` is ignored.
+    pub fn mpdist_pnorm(&self, ts_a: &[f64], ts_b: &[f64], p: f64, percentage: Option<f64>) -> f64 {
+        crate::algorithms::mpdist::mpdist_pnorm(ts_a, ts_b, self.config.m, p, percentage)
     }
 }
 

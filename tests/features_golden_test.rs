@@ -4,8 +4,8 @@
 //! and compares our implementation's output against stumpy's reference output.
 
 use motif_rs::{
-    allc, find_matches, find_snippets, mass, mdl, mmotifs, mpdist, mstump, ostinato, stimp,
-    subspace, AampEngine, EuclideanEngine, MatrixProfile, MatrixProfileConfig,
+    ab_join_pnorm, allc, find_matches, find_snippets, mass, mdl, mmotifs, mpdist, mstump, ostinato,
+    stimp, stomp_pnorm, subspace, AampEngine, EuclideanEngine, MatrixProfile, MatrixProfileConfig,
     ZNormalizedEuclidean,
 };
 use serde::Deserialize;
@@ -1215,4 +1215,80 @@ fn test_mmotifs_structural() {
             golden.motifs[0].distance, motifs[0].distance
         );
     }
+}
+
+// ─── P-norm Self-Join ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PnormGolden {
+    ts: Vec<f64>,
+    m: usize,
+    p: f64,
+    profile: Vec<f64>,
+    #[allow(dead_code)]
+    profile_index: Vec<i64>,
+}
+
+#[test]
+fn test_pnorm_p1_vs_stumpy() {
+    eprintln!("Testing P-norm p=1 (Manhattan) vs stumpy...");
+    let golden: PnormGolden = serde_json::from_str(&load_json("pnorm_p1_manhattan.json")).unwrap();
+
+    let config = MatrixProfileConfig::new(golden.m);
+    let mp = stomp_pnorm(&golden.ts, &config, golden.p);
+
+    assert_profile_match("pnorm_p1/profile", &mp.profile, &golden.profile, EPSILON);
+}
+
+#[test]
+fn test_pnorm_p3_vs_stumpy() {
+    eprintln!("Testing P-norm p=3 vs stumpy...");
+    let golden: PnormGolden = serde_json::from_str(&load_json("pnorm_p3_cubic.json")).unwrap();
+
+    let config = MatrixProfileConfig::new(golden.m);
+    let mp = stomp_pnorm(&golden.ts, &config, golden.p);
+
+    assert_profile_match("pnorm_p3/profile", &mp.profile, &golden.profile, EPSILON);
+}
+
+// ─── P-norm AB-Join ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PnormAbJoinGolden {
+    ts_a: Vec<f64>,
+    ts_b: Vec<f64>,
+    m: usize,
+    p: f64,
+    #[allow(dead_code)]
+    n_a: usize,
+    #[allow(dead_code)]
+    n_b: usize,
+    profile_a: Vec<f64>,
+    #[allow(dead_code)]
+    index_a: Vec<i64>,
+    profile_b: Vec<f64>,
+    #[allow(dead_code)]
+    index_b: Vec<i64>,
+}
+
+#[test]
+fn test_pnorm_ab_join_p1_vs_stumpy() {
+    eprintln!("Testing P-norm AB-join p=1 vs stumpy...");
+    let golden: PnormAbJoinGolden =
+        serde_json::from_str(&load_json("pnorm_ab_join_p1.json")).unwrap();
+
+    let (jp_a, jp_b) = ab_join_pnorm(&golden.ts_a, &golden.ts_b, golden.m, golden.p);
+
+    assert_profile_match(
+        "pnorm_ab_join_p1/profile_a",
+        &jp_a.distances,
+        &golden.profile_a,
+        EPSILON,
+    );
+    assert_profile_match(
+        "pnorm_ab_join_p1/profile_b",
+        &jp_b.distances,
+        &golden.profile_b,
+        EPSILON,
+    );
 }

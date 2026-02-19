@@ -1,3 +1,6 @@
+/// Default sigma threshold for detecting constant subsequences.
+pub const DEFAULT_SIGMA_THRESHOLD: f64 = 1e-15;
+
 /// Configuration for matrix profile computation.
 #[derive(Debug, Clone)]
 pub struct MatrixProfileConfig {
@@ -8,6 +11,9 @@ pub struct MatrixProfileConfig {
     /// Exclusion zone denominator: zone = ceil(m / exclusion_zone_denom).
     /// Default is 4 to match stumpy.
     pub exclusion_zone_denom: usize,
+    /// Threshold below which a subsequence's standard deviation is treated as zero
+    /// (constant subsequence). Default is 1e-15, matching stumpy's `config.STUMPY_STDDEV_THRESHOLD`.
+    pub sigma_threshold: f64,
 }
 
 impl MatrixProfileConfig {
@@ -16,6 +22,7 @@ impl MatrixProfileConfig {
             m,
             ignore_trivial: true,
             exclusion_zone_denom: 4,
+            sigma_threshold: DEFAULT_SIGMA_THRESHOLD,
         }
     }
 
@@ -127,7 +134,16 @@ impl RollingStats {
     /// Compute rolling statistics for subsequences of length `m`.
     ///
     /// Uses the same approach as stumpy: cumulative sums for numerical consistency.
+    /// Uses the default sigma threshold of 1e-15.
     pub fn compute(ts: &[f64], m: usize) -> Self {
+        Self::compute_with_threshold(ts, m, DEFAULT_SIGMA_THRESHOLD)
+    }
+
+    /// Compute rolling statistics with a custom sigma threshold.
+    ///
+    /// Subsequences with standard deviation below `sigma_threshold` are treated
+    /// as constant (m_sigma_inv set to 0).
+    pub fn compute_with_threshold(ts: &[f64], m: usize, sigma_threshold: f64) -> Self {
         assert!(m > 0, "Subsequence length must be > 0");
         assert!(ts.len() >= m, "Time series must be at least as long as m");
 
@@ -158,7 +174,7 @@ impl RollingStats {
             let sigma = var.sqrt();
             mean[i] = mu;
             std[i] = sigma;
-            if sigma < 1e-15 {
+            if sigma < sigma_threshold {
                 m_sigma_inv[i] = 0.0;
                 has_constant = true;
             } else {
@@ -176,6 +192,11 @@ impl RollingStats {
 
     /// Extend rolling statistics by one new subsequence after appending a point.
     pub fn extend(&mut self, ts: &[f64], m: usize) {
+        self.extend_with_threshold(ts, m, DEFAULT_SIGMA_THRESHOLD);
+    }
+
+    /// Extend rolling statistics with a custom sigma threshold.
+    pub fn extend_with_threshold(&mut self, ts: &[f64], m: usize, sigma_threshold: f64) {
         let n = ts.len();
         assert!(n >= m);
         let start = n - m;
@@ -189,7 +210,7 @@ impl RollingStats {
 
         self.mean.push(mu);
         self.std.push(sigma);
-        if sigma < 1e-15 {
+        if sigma < sigma_threshold {
             self.m_sigma_inv.push(0.0);
             self.has_constant = true;
         } else {
@@ -535,5 +556,27 @@ mod tests {
         let mut config = MatrixProfileConfig::new(10);
         config.ignore_trivial = false;
         assert_eq!(config.exclusion_zone(), 0);
+    }
+
+    #[test]
+    fn test_config_sigma_threshold_default() {
+        let config = MatrixProfileConfig::new(10);
+        assert_eq!(config.sigma_threshold, 1e-15);
+    }
+
+    #[test]
+    fn test_config_sigma_threshold_custom() {
+        // With a very high threshold, even non-constant subsequences are flagged
+        let ts = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let stats_default = RollingStats::compute(&ts, 3);
+        assert!(!stats_default.has_constant);
+
+        // A threshold of 1.0 should flag subsequences with sigma < 1.0
+        let stats_high = RollingStats::compute_with_threshold(&ts, 3, 1.0);
+        assert!(stats_high.has_constant);
+        // All m_sigma_inv should be 0 since sigma = sqrt(2/3) ≈ 0.816 < 1.0
+        for &inv in &stats_high.m_sigma_inv {
+            assert_eq!(inv, 0.0);
+        }
     }
 }

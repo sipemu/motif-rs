@@ -4,7 +4,7 @@ use crate::core::matrix_profile::{JoinAccumulator, JoinAccumulatorDist, JoinProf
 
 /// Minimum number of subsequences before dispatching to parallel AB-join.
 #[cfg(feature = "parallel")]
-const MIN_PARALLEL_SUBS: usize = 256;
+pub const MIN_PARALLEL_SUBS: usize = 256;
 
 /// Compute the AB-join between two time series.
 ///

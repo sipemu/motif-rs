@@ -5,7 +5,7 @@ use crate::core::matrix_profile::{MatrixProfile, MatrixProfileConfig, ProfileAcc
 /// Minimum number of subsequences before dispatching to parallel STOMP.
 /// Below this threshold, thread-dispatch overhead exceeds parallelism gains.
 #[cfg(feature = "parallel")]
-const MIN_PARALLEL_SUBS: usize = 256;
+pub const MIN_PARALLEL_SUBS: usize = 256;
 
 /// Compute the matrix profile using the STOMP algorithm.
 ///

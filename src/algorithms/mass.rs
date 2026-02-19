@@ -1,5 +1,5 @@
 use crate::algorithms::common::{apply_exclusion_zone, sliding_dot_product};
-use crate::core::matrix_profile::RollingStats;
+use crate::core::matrix_profile::{RollingStats, DEFAULT_SIGMA_THRESHOLD};
 
 /// A single match result from pattern matching.
 #[derive(Debug, Clone)]
@@ -52,10 +52,10 @@ pub fn mass(query: &[f64], ts: &[f64]) -> Vec<f64> {
     // Convert to distances
     let mut profile = vec![f64::INFINITY; n_subs];
 
-    if sigma_q < 1e-15 {
+    if sigma_q < DEFAULT_SIGMA_THRESHOLD {
         // Query is constant
         for (i, d) in profile.iter_mut().enumerate() {
-            if stats.std[i] < 1e-15 {
+            if stats.std[i] < DEFAULT_SIGMA_THRESHOLD {
                 // Both constant -> distance 0
                 *d = 0.0;
             } else {
@@ -65,7 +65,7 @@ pub fn mass(query: &[f64], ts: &[f64]) -> Vec<f64> {
         }
     } else {
         for (i, d) in profile.iter_mut().enumerate() {
-            if stats.std[i] < 1e-15 {
+            if stats.std[i] < DEFAULT_SIGMA_THRESHOLD {
                 // Subsequence is constant, query is not -> sqrt(2*m)
                 *d = (2.0 * m_f).sqrt();
             } else {

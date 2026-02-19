@@ -2,7 +2,7 @@ use realfft::RealFftPlanner;
 
 /// Size threshold (n * m) above which we dispatch to the FFT path.
 /// Below this, the naive O(n*m) loop wins due to lower constant overhead.
-const FFT_THRESHOLD: usize = 256 * 1024;
+pub const FFT_THRESHOLD: usize = 256 * 1024;
 
 /// Compute the sliding dot product between a query subsequence `q` and time series `ts`.
 ///

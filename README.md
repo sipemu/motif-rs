@@ -3,6 +3,7 @@
 [![CI](https://github.com/sipemu/motif-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/motif-rs/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/motif-rs.svg)](https://crates.io/crates/motif-rs)
 [![Documentation](https://docs.rs/motif-rs/badge.svg)](https://docs.rs/motif-rs)
+[![codecov](https://codecov.io/gh/sipemu/motif-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/sipemu/motif-rs)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 A high-performance matrix profile library for time series analysis, validated against [stumpy](https://github.com/TDAmeritrade/stumpy).

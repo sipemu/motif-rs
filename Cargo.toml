@@ -3,6 +3,11 @@ name = "motif-rs"
 version = "0.1.0"
 edition = "2021"
 description = "A modular matrix profile library for time series analysis"
+license = "MIT"
+repository = "https://github.com/sipemu/motif-rs"
+readme = "README.md"
+keywords = ["matrix-profile", "time-series", "motif", "anomaly-detection", "stomp"]
+categories = ["algorithms", "science"]
 
 [dependencies]
 realfft = "3.4"
